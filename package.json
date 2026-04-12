@@ -3,24 +3,35 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "concurrently --names \"web,server\" --prefix-colors \"cyan,yellow\" \"next dev\" \"npm run dev:server\"",
+    "dev:web": "next dev",
+    "dev:server": "cd apps/server && npm install --silent && npx ts-node index.ts",
+    "build": "npm run build:server && next build",
+    "build:server": "cd apps/server && npm install --silent && npx tsc",
+    "start": "concurrently --names \"web,server\" --prefix-colors \"cyan,yellow\" \"next start\" \"node apps/server/dist/index.js\"",
+    "start:web": "next start",
+    "start:server": "node apps/server/dist/index.js",
     "lint": "next lint"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "concurrently": "^8.2.2",
+    "fabric": "^7.2.0",
+    "next": "14.2.35",
     "react": "^18",
     "react-dom": "^18",
-    "next": "14.2.35"
+    "socket.io-client": "^4.8.3",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
-    "typescript": "^5",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "@types/uuid": "^10.0.0",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.35",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
-    "eslint": "^8",
-    "eslint-config-next": "14.2.35"
+    "typescript": "^5"
   }
 }

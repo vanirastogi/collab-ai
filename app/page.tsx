@@ -1,101 +1,89 @@
-import Image from "next/image";
+"use client";
+
+import { useState, KeyboardEvent } from "react";
+import { useRouter } from "next/navigation";
+import { v4 as uuidv4 } from "uuid";
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const router = useRouter();
+  const [roomInput, setRoomInput] = useState("");
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  function createRoom() {
+    const id = uuidv4().slice(0, 8);
+    router.push(`/room/${id}`);
+  }
+
+  function joinRoom() {
+    const id = roomInput.trim();
+    if (id) router.push(`/room/${id}`);
+  }
+
+  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") joinRoom();
+  }
+
+  return (
+    <main className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 w-full max-w-md p-10 flex flex-col gap-8">
+
+        {/* Header */}
+        <div className="flex flex-col gap-1 text-center">
+          <h1 className="text-3xl font-bold tracking-tight text-gray-900">
+            Collab.ai
+          </h1>
+          <p className="text-sm text-gray-500">
+            Real-time collaborative code editor and whiteboard
+          </p>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+
+        {/* Divider */}
+        <div className="border-t border-gray-100" />
+
+        {/* Create room */}
+        <div className="flex flex-col gap-2">
+          <span className="text-xs font-medium uppercase tracking-widest text-gray-400">
+            New room
+          </span>
+          <button
+            onClick={createRoom}
+            className="w-full rounded-xl bg-gray-900 text-white text-sm font-medium py-3 hover:bg-gray-700 active:scale-[0.98] transition-all"
+          >
+            Create new room
+          </button>
+        </div>
+
+        {/* Divider with label */}
+        <div className="flex items-center gap-3">
+          <div className="flex-1 border-t border-gray-100" />
+          <span className="text-xs text-gray-400">or join existing</span>
+          <div className="flex-1 border-t border-gray-100" />
+        </div>
+
+        {/* Join room */}
+        <div className="flex flex-col gap-2">
+          <span className="text-xs font-medium uppercase tracking-widest text-gray-400">
+            Room ID
+          </span>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="e.g. a1b2c3d4"
+              value={roomInput}
+              onChange={(e) => setRoomInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              className="flex-1 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-gray-400 focus:bg-white transition-colors"
+            />
+            <button
+              onClick={joinRoom}
+              disabled={!roomInput.trim()}
+              className="rounded-xl border border-gray-200 px-5 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            >
+              Join
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </main>
   );
 }

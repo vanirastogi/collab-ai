@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -24,4 +25,17 @@ body {
   .text-balance {
     text-wrap: balance;
   }
+}
+
+/* ── Monaco editor issue decorations ──────────────────────────────────────── */
+/* Applied via deltaDecorations() in components/CodeEditor.tsx               */
+
+.monaco-error-line {
+  background-color: rgba(248, 113, 113, 0.15); /* red-400 at 15% */
+  border-left: 2px solid #f87171;
+}
+
+.monaco-warning-line {
+  background-color: rgba(251, 191, 36, 0.12); /* amber-400 at 12% */
+  border-left: 2px solid #fbbf24;
 }
