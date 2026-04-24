@@ -328,7 +328,7 @@ export default function AIPanel({
             {/* Idle state */}
             {status === "idle" && !result && (
               <p className="text-xs text-gray-600 text-center pt-6 leading-relaxed">
-                Click <span className="text-gray-400">"Review code"</span> to get AI feedback on the code in the editor.
+                Click <span className="text-gray-400">&quot;Review code&quot;</span> to get AI feedback on the code in the editor.
               </p>
             )}
 
