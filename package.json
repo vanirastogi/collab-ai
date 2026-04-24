@@ -6,7 +6,7 @@
     "dev": "concurrently --names \"web,server\" --prefix-colors \"cyan,yellow\" \"next dev\" \"npm run dev:server\"",
     "dev:web": "next dev",
     "dev:server": "cd apps/server && npm install --silent && npx ts-node index.ts",
-    "build": "npm run build:server && next build",
+    "build": "next build",
     "build:server": "cd apps/server && npm install --silent && npx tsc",
     "start": "concurrently --names \"web,server\" --prefix-colors \"cyan,yellow\" \"next start\" \"node apps/server/dist/index.js\"",
     "start:web": "next start",
