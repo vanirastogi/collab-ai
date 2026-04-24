@@ -8,9 +8,10 @@ import type * as MonacoTypes from "monaco-editor";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface Issue {
-  line: number;
-  severity: "error" | "warning";
-  message: string;
+  line:     number;
+  severity: "error" | "warning" | "info";
+  message:  string;
+  fix?:     string;
 }
 
 interface CodeEditorProps {
@@ -229,12 +230,14 @@ export default function CodeEditor({
       options: {
         isWholeLine: true,
         className:
-          issue.severity === "error" ? "monaco-error-line" : "monaco-warning-line",
+          issue.severity === "error"   ? "monaco-error-line"
+          : issue.severity === "warning" ? "monaco-warning-line"
+          : "monaco-info-line",
         hoverMessage: {
-          value: `**${issue.severity === "error" ? "Error" : "Warning"}:** ${issue.message}`,
+          value: `**${issue.severity === "error" ? "Error" : issue.severity === "warning" ? "Warning" : "Info"}:** ${issue.message}`,
         },
         overviewRuler: {
-          color: issue.severity === "error" ? "#f87171" : "#fbbf24",
+          color: issue.severity === "error" ? "#f87171" : issue.severity === "warning" ? "#fbbf24" : "#60a5fa",
           position: monaco.editor.OverviewRulerLane.Right,
         },
       },

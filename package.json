@@ -14,10 +14,16 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
+    "@clerk/nextjs": "^7.2.5",
     "@monaco-editor/react": "^4.7.0",
+    "@supabase/supabase-js": "^2.104.1",
     "concurrently": "^8.2.2",
+    "date-fns": "^4.1.0",
     "fabric": "^7.2.0",
+    "nanoid": "^5.1.9",
     "next": "14.2.35",
+    "openai": "^6.34.0",
     "react": "^18",
     "react-dom": "^18",
     "socket.io-client": "^4.8.3",

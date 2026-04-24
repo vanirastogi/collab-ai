@@ -54,6 +54,7 @@ const io = new Server(httpServer, {
 // ─── In-memory rooms store ────────────────────────────────────────────────────
 
 const rooms: Record<string, Room> = {};
+const roomDSA: Record<string, Array<{problemId:number, userId:string, userName:string}>> = {};
 
 function getOrCreateRoom(roomId: string): Room {
   if (!rooms[roomId]) {
@@ -147,6 +148,20 @@ io.on("connection", (rawSocket: Socket) => {
       socket.to(roomId).emit("cursor-move", { userId: socket.id, position });
     }
   );
+
+  // ── dsa:solve ──────────────────────────────────────────────────────────────
+  socket.on('dsa:solve', ({ roomId, problemId, userId, userName }) => {
+    if (!roomDSA[roomId]) roomDSA[roomId] = [];
+    const exists = roomDSA[roomId].find(s => 
+      s.problemId === problemId && s.userId === userId);
+    if (!exists) roomDSA[roomId].push({ problemId, userId, userName });
+    io.to(roomId).emit('dsa:room_state', roomDSA[roomId]);
+  });
+
+  // ── dsa:request_state ──────────────────────────────────────────────────────
+  socket.on('dsa:request_state', ({ roomId }) => {
+    socket.emit('dsa:room_state', roomDSA[roomId] || []);
+  });
 
   // ── disconnect ─────────────────────────────────────────────────────────────
   socket.on("disconnect", () => {
