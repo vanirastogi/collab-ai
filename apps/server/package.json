@@ -9,10 +9,13 @@
   },
   "dependencies": {
     "@clerk/backend": "^3.4.1",
+    "@types/ws": "^8.18.1",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "express": "^4.18.2",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "ws": "^8.20.0",
+    "y-websocket": "^3.0.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

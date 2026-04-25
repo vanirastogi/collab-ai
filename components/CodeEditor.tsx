@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import MonacoEditor, { OnMount, OnChange } from "@monaco-editor/react";
 import type { Socket } from "socket.io-client";
 import type * as MonacoTypes from "monaco-editor";
@@ -14,13 +14,18 @@ export interface Issue {
   fix?:     string;
 }
 
+export interface CodeEditorHandle {
+  /** Seed the Yjs document if it is empty (called with DB code on join). */
+  setEditorValue: (value: string) => void;
+}
+
 interface CodeEditorProps {
-  socket: Socket | null;
-  roomId: string;
-  code: string;
-  language: string;
+  socket:       Socket | null;
+  roomId:       string;
+  code:         string;
+  language:     string;
   onCodeChange: (code: string) => void;
-  issues: Issue[];
+  issues:       Issue[];
 }
 
 // ─── Cursor colours ───────────────────────────────────────────────────────────
@@ -38,60 +43,30 @@ function colorForUser(userId: string): string {
   return CURSOR_COLORS[Math.abs(hash) % CURSOR_COLORS.length];
 }
 
-// ─── Cursor style injection ───────────────────────────────────────────────────
-//
-// Monaco renders `afterContentClassName` as a real <span> directly in the text
-// layer — the same layer that renders characters. This layer does NOT have
-// overflow:hidden, so the label tag that pokes above the line is visible.
-//
-// Content widgets (the previous approach) are placed in a separate overlay
-// container that DOES have overflow:hidden, which clipped our label.
-//
-// By injecting a <style> element into the editor's own container div we get:
-//   • A 2px colored border-left that fills the full line height → the caret
-//   • A ::after pseudo-element with content: 'name' floating above → the tag
-// This is the same technique used by y-monaco and VS Code Live Share.
-
 function injectCursorStyle(container: HTMLElement, userId: string, color: string): void {
   const id = `rc-style-${userId}`;
-  if (container.querySelector(`#${id}`)) return; // already injected for this user
-
+  if (container.querySelector(`#${id}`)) return;
   const label = `user·${userId.slice(-4)}`;
   const style = document.createElement("style");
   style.id = id;
-  // language=CSS
   style.textContent = `
     .rc-${userId} {
-      position: absolute;
-      border-left: 2px solid ${color};
-      height: 100%;
-      box-sizing: border-box;
-      pointer-events: auto;
-      cursor: default;
+      position: absolute; border-left: 2px solid ${color};
+      height: 100%; box-sizing: border-box;
+      pointer-events: auto; cursor: default;
     }
     .rc-${userId}::after {
       content: '${label}';
-      position: absolute;
-      top: -22px;
-      left: -2px;
-      padding: 2px 6px;
-      background: ${color};
-      color: #fff;
-      font-size: 10px;
-      font-family: system-ui, -apple-system, sans-serif;
-      font-weight: 600;
-      border-radius: 3px 3px 3px 0;
-      white-space: nowrap;
-      z-index: 999;
-      opacity: 0;
-      transform: translateY(4px);
+      position: absolute; top: -22px; left: -2px;
+      padding: 2px 6px; background: ${color}; color: #fff;
+      font-size: 10px; font-family: system-ui, -apple-system, sans-serif;
+      font-weight: 600; border-radius: 3px 3px 3px 0;
+      white-space: nowrap; z-index: 999;
+      opacity: 0; transform: translateY(4px);
       transition: opacity 0.15s ease, transform 0.15s ease;
       pointer-events: none;
     }
-    .rc-${userId}:hover::after {
-      opacity: 1;
-      transform: translateY(0);
-    }
+    .rc-${userId}:hover::after { opacity: 1; transform: translateY(0); }
   `;
   container.appendChild(style);
 }
@@ -103,120 +78,84 @@ function removeCursorStyle(container: HTMLElement, userId: string): void {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function CodeEditor({
+const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEditor({
   socket,
   roomId,
   code,
   language,
   onCodeChange,
   issues,
-}: CodeEditorProps) {
-  const editorRef = useRef<MonacoTypes.editor.IStandaloneCodeEditor | null>(null);
-  const monacoRef = useRef<typeof MonacoTypes | null>(null);
-
-  // One decoration collection per remote user — lets us update/clear per user
-  // without touching anyone else's cursor.
-  const cursorsRef = useRef<
-    Map<string, MonacoTypes.editor.IEditorDecorationsCollection>
-  >(new Map());
-
-  // ── isRemoteChange / ev.isFlush — echo-loop prevention ───────────────────
-  // ev.isFlush (primary): Monaco sets this to true when onChange fires due to
-  // editor.setValue(), not user input. We skip emitting in that case.
-  // isRemoteChange (secondary): belt-and-suspenders ref fallback.
-  const isRemoteChange = useRef(false);
-
-  // ── Decoration collection for issue highlights ────────────────────────────
-  // createDecorationsCollection() atomically swaps the old set for a new one.
-  // The ref is null until mount because it requires a live editor instance.
+}, ref) {
+  const editorRef    = useRef<MonacoTypes.editor.IStandaloneCodeEditor | null>(null);
+  const monacoRef    = useRef<typeof MonacoTypes | null>(null);
+  const cursorsRef   = useRef<Map<string, MonacoTypes.editor.IEditorDecorationsCollection>>(new Map());
   const issueDecorations = useRef<MonacoTypes.editor.IEditorDecorationsCollection | null>(null);
 
-  // ── Remote code sync ──────────────────────────────────────────────────────
+  // Yjs refs — set once the provider syncs in handleMount
+  const ytextRef          = useRef<import("yjs").Text | null>(null);
+  const pendingInitialCode = useRef<string | null>(null);
+  const yjsCleanupRef     = useRef<(() => void) | null>(null);
+
+  // ── Seed Yjs from DB/socket room-state ───────────────────────────────────
+  // Called by the parent after DB or socket provides initial code.
+  // Only inserts if the Yjs document is empty so live data is never overwritten.
+  useImperativeHandle(ref, () => ({
+    setEditorValue(value: string) {
+      if (!value) return;
+      const ytext = ytextRef.current;
+      if (ytext !== null) {
+        if (ytext.toString() === "") ytext.insert(0, value);
+      } else {
+        // Yjs not connected yet — store and apply after sync
+        pendingInitialCode.current = value;
+      }
+    },
+  }));
+
+  // Cleanup Yjs on unmount
+  useEffect(() => () => { yjsCleanupRef.current?.(); }, []);
+
+  // ── Remote cursors (socket) ───────────────────────────────────────────────
   useEffect(() => {
-    function onCodeUpdate(newCode: string) {
-      const editor = editorRef.current;
-      if (!editor) return;
-
-      const position = editor.getPosition();
-      const scrollTop = editor.getScrollTop();
-
-      isRemoteChange.current = true;
-      editor.setValue(newCode);
-      isRemoteChange.current = false;
-
-      if (position) editor.setPosition(position);
-      editor.setScrollTop(scrollTop);
-    }
-
-    if (!socket) return;
-    socket.on("code-change", onCodeUpdate);
-    return () => { socket.off("code-change", onCodeUpdate); };
-  }, [socket]);
-
-  // ── Remote cursors ────────────────────────────────────────────────────────
-  useEffect(() => {
-    function onCursorMove({
-      userId,
-      position,
-    }: {
-      userId: string;
-      position: { lineNumber: number; column: number };
+    function onCursorMove({ userId, position }: {
+      userId: string; position: { lineNumber: number; column: number };
     }) {
       const editor = editorRef.current;
       const monaco = monacoRef.current;
       if (!editor || !monaco) return;
 
       const color = colorForUser(userId);
-      const container = editor.getContainerDomNode();
+      injectCursorStyle(editor.getContainerDomNode(), userId, color);
 
-      // Inject the <style> tag once per user the first time we hear from them.
-      injectCursorStyle(container, userId, color);
-
-      const decorationSpec: MonacoTypes.editor.IModelDeltaDecoration = {
-        // Zero-width range: start === end. Monaco still creates a span here,
-        // and afterContentClassName attaches our cursor <span> right after it.
-        range: new monaco.Range(
-          position.lineNumber,
-          position.column,
-          position.lineNumber,
-          position.column,
-        ),
+      const spec: MonacoTypes.editor.IModelDeltaDecoration = {
+        range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
         options: {
           afterContentClassName: `rc-${userId}`,
-          // Prevents the decoration from growing when the local user types
-          // adjacent to a remote cursor position.
-          stickiness:
-            monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+          stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
           zIndex: 99,
         },
       };
-
       const existing = cursorsRef.current.get(userId);
       if (existing) {
-        existing.set([decorationSpec]); // update position atomically
+        existing.set([spec]);
       } else {
-        const col = editor.createDecorationsCollection([decorationSpec]);
-        cursorsRef.current.set(userId, col);
+        cursorsRef.current.set(userId, editor.createDecorationsCollection([spec]));
       }
     }
 
     function onCursorLeave({ userId }: { userId: string }) {
       const editor = editorRef.current;
       if (!editor) return;
-
-      const col = cursorsRef.current.get(userId);
-      if (col) {
-        col.clear();
-        cursorsRef.current.delete(userId);
-      }
+      cursorsRef.current.get(userId)?.clear();
+      cursorsRef.current.delete(userId);
       removeCursorStyle(editor.getContainerDomNode(), userId);
     }
 
     if (!socket) return;
-    socket.on("cursor-move", onCursorMove);
+    socket.on("cursor-move",  onCursorMove);
     socket.on("cursor-leave", onCursorLeave);
     return () => {
-      socket.off("cursor-move", onCursorMove);
+      socket.off("cursor-move",  onCursorMove);
       socket.off("cursor-leave", onCursorLeave);
     };
   }, [socket]);
@@ -227,7 +166,7 @@ export default function CodeEditor({
     const monaco = monacoRef.current;
     if (!editor || !monaco) return;
 
-    const specs: MonacoTypes.editor.IModelDeltaDecoration[] = issues.map((issue) => ({
+    issueDecorations.current?.set(issues.map((issue) => ({
       range: new monaco.Range(issue.line, 1, issue.line, Number.MAX_SAFE_INTEGER),
       options: {
         isWholeLine: true,
@@ -243,46 +182,84 @@ export default function CodeEditor({
           position: monaco.editor.OverviewRulerLane.Right,
         },
       },
-    }));
-
-    issueDecorations.current?.set(specs);
+    })));
   }, [issues]);
 
   // ── Mount ─────────────────────────────────────────────────────────────────
-  const handleMount: OnMount = (editor, monaco) => {
-    editorRef.current = editor;
-    monacoRef.current = monaco;
+  const handleMount: OnMount = async (editor, monaco) => {
+    editorRef.current  = editor;
+    monacoRef.current  = monaco;
+    issueDecorations.current = editor.createDecorationsCollection([]);
 
     editor.updateOptions({
       fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
       fontLigatures: true,
     });
 
-    // Initialise the issue-decoration collection on mount.
-    issueDecorations.current = editor.createDecorationsCollection([]);
-
-    // Emit our own cursor position to peers, throttled to 50 ms.
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    // ── Cursor emit (socket) ────────────────────────────────────────────────
+    let cursorTimer: ReturnType<typeof setTimeout> | null = null;
     editor.onDidChangeCursorPosition((e) => {
-      if (timer) return;
-      timer = setTimeout(() => {
-        timer = null;
+      if (cursorTimer) return;
+      cursorTimer = setTimeout(() => {
+        cursorTimer = null;
         socket?.emit("cursor-move", {
           roomId,
           position: { lineNumber: e.position.lineNumber, column: e.position.column },
         });
       }, 50);
     });
+
+    // ── Yjs setup (dynamic import — runs only in browser) ──────────────────
+    const [{ Doc }, { WebsocketProvider }, { MonacoBinding }] = await Promise.all([
+      import("yjs"),
+      import("y-websocket"),
+      import("y-monaco"),
+    ]);
+
+    const wsUrl = (process.env.NEXT_PUBLIC_SERVER_URL ?? "ws://localhost:3001")
+      .replace(/^http/, "ws");
+
+    const ydoc    = new Doc();
+    const ytext   = ydoc.getText("monaco");
+    const provider = new WebsocketProvider(`${wsUrl}/yjs`, roomId, ydoc);
+
+    ytextRef.current = ytext;
+
+    // Once initial sync completes, seed from DB/socket if Yjs is still empty
+    provider.on("synced", () => {
+      const pending = pendingInitialCode.current;
+      if (pending && ytext.toString() === "") {
+        ytext.insert(0, pending);
+        pendingInitialCode.current = null;
+      }
+    });
+
+    // Bind Yjs ↔ Monaco — handles all CRDT conflict resolution automatically
+    const binding = new MonacoBinding(
+      ytext,
+      editor.getModel()!,
+      new Set([editor]),
+      provider.awareness,
+    );
+
+    // Notify parent of code changes (for save, AI review, run)
+    ytext.observe(() => {
+      onCodeChange(ytext.toString());
+    });
+
+    yjsCleanupRef.current = () => {
+      binding.destroy();
+      provider.destroy();
+      ydoc.destroy();
+    };
   };
 
-  // ── onChange ──────────────────────────────────────────────────────────────
-  const handleChange: OnChange = (value, ev) => {
-    if (ev.isFlush) return;
-    if (isRemoteChange.current) return;
-    if (value === undefined) return;
-
-    onCodeChange(value);
-    socket?.emit("code-change", { roomId, code: value });
+  // ── onChange — only for localStorage / parent state, not for sync ─────────
+  // Yjs handles sync. We still need onChange to tell the parent the code changed.
+  // But ytext.observe above already does that, so handleChange just avoids
+  // double-calling onCodeChange for local edits (ytext.observe fires for all).
+  const handleChange: OnChange = (_value, ev) => {
+    if (ev.isFlush) return; // Monaco internal flush, not user input
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────
@@ -313,4 +290,6 @@ export default function CodeEditor({
       />
     </div>
   );
-}
+});
+
+export default CodeEditor;

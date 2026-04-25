@@ -1,12 +1,14 @@
 import express from "express";
 import { createServer } from "http";
+import { WebSocketServer } from "ws";
 import { Server, Socket } from "socket.io";
 import cors from "cors";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { setupWSConnection } = require("y-websocket/bin/utils");
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Room {
-  code: string;
   language: string;
   whiteboardData: string;
   users: Set<string>;
@@ -21,10 +23,6 @@ interface JoinRoomPayload {
   username?: string;
 }
 
-interface CodeChangePayload {
-  roomId: string;
-  code: string;
-}
 
 interface LanguageChangePayload {
   roomId: string;
@@ -51,6 +49,23 @@ const io = new Server(httpServer, {
   },
 });
 
+// ─── Yjs WebSocket server ─────────────────────────────────────────────────────
+// Runs on the same HTTP server as Socket.IO but on the /yjs/* path.
+// setupWSConnection handles the entire Yjs sync protocol — room names are
+// extracted from the URL automatically (e.g. /yjs/ROOM_ID).
+
+const yWss = new WebSocketServer({ noServer: true });
+yWss.on("connection", setupWSConnection);
+
+httpServer.on("upgrade", (request, socket, head) => {
+  const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+  if (pathname.startsWith("/yjs")) {
+    yWss.handleUpgrade(request, socket, head, (ws) => {
+      yWss.emit("connection", ws, request);
+    });
+  }
+});
+
 // ─── In-memory rooms store ────────────────────────────────────────────────────
 
 const rooms: Record<string, Room> = {};
@@ -59,7 +74,6 @@ const roomDSA: Record<string, Array<{problemId:number, userId:string, userName:s
 function getOrCreateRoom(roomId: string): Room {
   if (!rooms[roomId]) {
     rooms[roomId] = {
-      code: "",
       language: "javascript",
       whiteboardData: "",
       users: new Set(),
@@ -101,7 +115,7 @@ io.on("connection", (rawSocket: Socket) => {
 
     // Send current room state back to the joiner only
     socket.emit("room-state", {
-      code: room.code,
+      code: "",        // code is now managed by Yjs, not in-memory
       language: room.language,
       whiteboardData: room.whiteboardData,
       userCount: room.users.size,
@@ -111,14 +125,7 @@ io.on("connection", (rawSocket: Socket) => {
     socket.to(roomId).emit("user-count", room.users.size);
   });
 
-  // ── code-change ────────────────────────────────────────────────────────────
-  socket.on("code-change", ({ roomId, code }: CodeChangePayload) => {
-    if (!roomId || !rooms[roomId]) return;
-
-    rooms[roomId].code = code;
-    // Broadcast to every other socket in the room
-    socket.to(roomId).emit("code-change", code);
-  });
+  // code-change is now handled by Yjs — no socket handler needed.
 
   // ── language-change ────────────────────────────────────────────────────────
   socket.on("language-change", ({ roomId, language }: LanguageChangePayload) => {
