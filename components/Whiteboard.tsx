@@ -23,7 +23,7 @@ export type { DrawObject };
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface WhiteboardProps {
-  socket:       Socket;
+  socket:       Socket | null;
   roomId:       string;
   initialData?: string;
   /** Set by the parent each time the AI produces new objects to draw. */
@@ -285,6 +285,9 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       function onKeyDown(e: KeyboardEvent) {
         if (e.code !== "Space" || e.repeat) return;
         if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+        // Do not intercept if Whiteboard is hidden (Code/DSA tab is active)
+        if (!containerRef.current || containerRef.current.offsetParent === null) return;
+        
         isSpaceDown.current = true;
         fc.defaultCursor = "grab";
         fc.setCursor("grab");

@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useUser, UserButton } from "@clerk/nextjs";
-import { getSocket } from "@/lib/socket";
+import { useUser, useAuth, UserButton } from "@clerk/nextjs";
+import { connectSocket, getSocket } from "@/lib/socket";
+import type { Socket } from "socket.io-client";
 import CodeEditor, { type Issue } from "@/components/CodeEditor";
 import Whiteboard, { type DrawObject } from "@/components/Whiteboard";
 import AIPanel from "@/components/AIPanel";
@@ -41,7 +42,8 @@ export default function RoomPage() {
   const { id: roomId } = useParams<{ id: string }>();
   const router = useRouter();
   const { user } = useUser();
-  const socket = getSocket();
+  const { getToken } = useAuth();
+  const [socket, setSocket] = useState<Socket | null>(getSocket());
 
   const userName =
     user?.fullName ?? user?.firstName ?? user?.username ?? "Anonymous";
@@ -69,6 +71,16 @@ export default function RoomPage() {
   const [reviewTrigger,  setReviewTrigger]  = useState(0);
   // True once the socket gives us real live state — DB load should not override it
   const socketGaveData    = useRef(false);
+
+  // ── Socket auth ─────────────────────────────────────────────────────────────
+  // Get Clerk session token and (re)connect the socket with it so the server
+  // can verify every connection is from an authenticated user.
+  useEffect(() => {
+    if (!user) return;
+    getToken().then((token) => {
+      if (token) setSocket(connectSocket(token));
+    });
+  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── DB load on mount ────────────────────────────────────────────────────────
   // Fetch persisted room state from Supabase. If the room doesn't exist yet
@@ -127,7 +139,7 @@ export default function RoomPage() {
 
   // ── Socket setup ────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || !socket) return;
     socket.emit("join-room", { roomId, userId: user?.id, userName });
 
     function onRoomState(state: RoomState) {
@@ -152,7 +164,7 @@ export default function RoomPage() {
       socket.off("user-count",      onUserCount);
       socket.off("language-change", onLanguageChange);
     };
-  }, [roomId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [roomId, socket]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Keep latest-value refs in sync (for debounced save closures) ───────────
   useEffect(() => { latestCode.current     = code;          }, [code]);
@@ -168,7 +180,7 @@ export default function RoomPage() {
 
   function handleLanguageChange(lang: string) {
     setLanguage(lang);
-    socket.emit("language-change", { roomId, language: lang });
+    socket?.emit("language-change", { roomId, language: lang });
     // Persist language change immediately (it's a rare, intentional action)
     saveToDb({ language: lang });
   }
