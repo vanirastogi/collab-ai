@@ -322,7 +322,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       // ── Emit local changes ────────────────────────────────────────────────
       function emitChange() {
         if (isReceiving.current) return;
-        socket.emit("whiteboard-change", {
+        socket?.emit("whiteboard-change", {
           roomId,
           whiteboardData: JSON.stringify(fc.toJSON()),
         });
@@ -375,6 +375,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       }
     }
 
+    if (!socket) return;
     socket.on("whiteboard-change", onWhiteboardChange);
     return () => { socket.off("whiteboard-change", onWhiteboardChange); };
   }, [socket]);
@@ -532,7 +533,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
     if (!fc) return;
     fc.clear();
     fc.requestRenderAll();
-    socket.emit("whiteboard-change", { roomId, whiteboardData: "" });
+    socket?.emit("whiteboard-change", { roomId, whiteboardData: "" });
   }
 
   // ─── Render ───────────────────────────────────────────────────────────────

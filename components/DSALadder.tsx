@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { Socket } from "socket.io-client";
 
 interface DSALadderProps {
-  socket: Socket;
+  socket: Socket | null;
   roomId: string;
   userId: string;
   userName: string;
@@ -78,7 +78,7 @@ export default function DSALadder({ socket, roomId, userId, userName }: DSALadde
       });
 
     // 2. Request room state
-    socket.emit('dsa:request_state', { roomId });
+    socket?.emit('dsa:request_state', { roomId });
 
     // 3. Fire and forget sync
     fetch("/api/dsa/sync", { method: "POST" })
@@ -102,6 +102,7 @@ export default function DSALadder({ socket, roomId, userId, userName }: DSALadde
     const handleRoomState = (solves: RoomSolve[]) => {
       setRoomSolves(solves);
     };
+    if (!socket) return;
     socket.on('dsa:room_state', handleRoomState);
     return () => {
       socket.off('dsa:room_state', handleRoomState);
@@ -123,7 +124,7 @@ export default function DSALadder({ socket, roomId, userId, userName }: DSALadde
     if (data.success) {
       setSolvedSlugs(prev => new Set(prev).add(problem.slug));
       setTotalXP(prev => prev + data.xp);
-      socket.emit('dsa:solve', { roomId, problemId: problem.id, userId, userName });
+      socket?.emit('dsa:solve', { roomId, problemId: problem.id, userId, userName });
     }
   }
 
