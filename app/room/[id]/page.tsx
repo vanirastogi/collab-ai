@@ -67,6 +67,8 @@ export default function RoomPage() {
   const latestLanguage    = useRef(language);
   const latestWb          = useRef(whiteboardData);
   const [reviewTrigger,  setReviewTrigger]  = useState(0);
+  // True once the socket gives us real live state — DB load should not override it
+  const socketGaveData    = useRef(false);
 
   // ── DB load on mount ────────────────────────────────────────────────────────
   // Fetch persisted room state from Supabase. If the room doesn't exist yet
@@ -79,12 +81,17 @@ export default function RoomPage() {
 
       if (res.ok) {
         const data = await res.json();
-        // Only set if non-empty — the socket may have already populated state
-        // for users already in the room; the DB is the ground truth on first load.
-        if (data.code)      setCode(data.code);
-        if (data.language)  setLanguage(data.language);
-        if (data.whiteboard && JSON.stringify(data.whiteboard) !== "{}") {
-          setWhiteboardData(JSON.stringify(data.whiteboard));
+        // Only apply DB state if the socket didn't already give us live data.
+        // If other users are in the room, their in-memory socket state is more
+        // current than the DB (which lags by the 2 s debounce). If the socket
+        // came back empty (server restart, no active users), DB is the source
+        // of truth.
+        if (!socketGaveData.current) {
+          if (data.code)      setCode(data.code);
+          if (data.language)  setLanguage(data.language);
+          if (data.whiteboard && JSON.stringify(data.whiteboard) !== "{}") {
+            setWhiteboardData(JSON.stringify(data.whiteboard));
+          }
         }
       } else if (res.status === 404) {
         // Room exists in Socket.IO memory but not in DB yet — create it.
@@ -124,6 +131,11 @@ export default function RoomPage() {
     socket.emit("join-room", { roomId, userId: user?.id, userName });
 
     function onRoomState(state: RoomState) {
+      // Mark that socket gave us real live data so the DB load won't clobber it.
+      // Live data = other users are present, or the server has code/whiteboard in memory.
+      if (state.userCount > 1 || state.code || state.whiteboardData) {
+        socketGaveData.current = true;
+      }
       setCode(state.code);
       setLanguage(state.language);
       setWhiteboardData(state.whiteboardData);
