@@ -57,6 +57,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
   const lastPan      = useRef({ x: 0, y: 0 });
   const disposalRef  = useRef<Promise<boolean | void>>(Promise.resolve());
   const FabricPoint  = useRef<typeof import("fabric").Point | null>(null);
+  const socketRef    = useRef(socket);
 
   // Tracks label → center position of every AI-drawn box so arrows can connect them.
   const labelPositions = useRef<Map<string, { cx: number; cy: number }>>(new Map());
@@ -72,6 +73,9 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
   const [color,     setColor]     = useState("#ffffff");
   const [brushSize, setBrushSize] = useState(4);
   const [zoom,      setZoom]      = useState(100);
+
+  // Keep socketRef current so closures inside canvas init always see latest socket
+  useEffect(() => { socketRef.current = socket; }, [socket]);
 
   // ── Canvas init ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -322,7 +326,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       // ── Emit local changes ────────────────────────────────────────────────
       function emitChange() {
         if (isReceiving.current) return;
-        socket?.emit("whiteboard-change", {
+        socketRef.current?.emit("whiteboard-change", {
           roomId,
           whiteboardData: JSON.stringify(fc.toJSON()),
         });
@@ -533,7 +537,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
     if (!fc) return;
     fc.clear();
     fc.requestRenderAll();
-    socket?.emit("whiteboard-change", { roomId, whiteboardData: "" });
+    socketRef.current?.emit("whiteboard-change", { roomId, whiteboardData: "" });
   }
 
   // ─── Render ───────────────────────────────────────────────────────────────
