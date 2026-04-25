@@ -64,9 +64,11 @@ export async function POST(req: Request) {
     // JDoodle returns all output (stdout + stderr) in a single "output" field.
     // A non-200 statusCode means a compilation or runtime error.
     const isError = data.statusCode !== 200;
+    const errorMessage = data.error || data.output || `Execution failed (Status: ${data.statusCode})`;
+    
     const result: RunResult = {
       stdout:   isError ? "" : (data.output ?? ""),
-      stderr:   isError ? (data.output ?? "Execution failed") : "",
+      stderr:   isError ? errorMessage : "",
       exitCode: isError ? 1 : 0,
       language: mapping.language,
       cpuTime:  data.cpuTime,
