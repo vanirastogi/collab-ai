@@ -15,7 +15,7 @@ export interface Issue {
 }
 
 interface CodeEditorProps {
-  socket: Socket;
+  socket: Socket | null;
   roomId: string;
   code: string;
   language: string;
@@ -148,6 +148,7 @@ export default function CodeEditor({
       editor.setScrollTop(scrollTop);
     }
 
+    if (!socket) return;
     socket.on("code-change", onCodeUpdate);
     return () => { socket.off("code-change", onCodeUpdate); };
   }, [socket]);
@@ -211,6 +212,7 @@ export default function CodeEditor({
       removeCursorStyle(editor.getContainerDomNode(), userId);
     }
 
+    if (!socket) return;
     socket.on("cursor-move", onCursorMove);
     socket.on("cursor-leave", onCursorLeave);
     return () => {
@@ -265,7 +267,7 @@ export default function CodeEditor({
       if (timer) return;
       timer = setTimeout(() => {
         timer = null;
-        socket.emit("cursor-move", {
+        socket?.emit("cursor-move", {
           roomId,
           position: { lineNumber: e.position.lineNumber, column: e.position.column },
         });
@@ -280,7 +282,7 @@ export default function CodeEditor({
     if (value === undefined) return;
 
     onCodeChange(value);
-    socket.emit("code-change", { roomId, code: value });
+    socket?.emit("code-change", { roomId, code: value });
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────

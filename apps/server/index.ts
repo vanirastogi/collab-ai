@@ -1,7 +1,14 @@
+import path from "path";
+import dotenv from "dotenv";
+
+// Load root .env (two levels up from apps/server/) before anything else reads env vars
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
+
 import express from "express";
 import { createServer } from "http";
 import { Server, Socket } from "socket.io";
 import cors from "cors";
+import { verifyToken } from "@clerk/backend";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +56,21 @@ const io = new Server(httpServer, {
     origin: "*",
     methods: ["GET", "POST"],
   },
+});
+
+// ─── Auth middleware ──────────────────────────────────────────────────────────
+// Verify Clerk JWT on every socket connection before allowing it through.
+
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth?.token as string | undefined;
+  if (!token) return next(new Error("Unauthorized: no token"));
+
+  try {
+    await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
+    next();
+  } catch {
+    next(new Error("Unauthorized: invalid token"));
+  }
 });
 
 // ─── In-memory rooms store ────────────────────────────────────────────────────
