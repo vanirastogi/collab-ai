@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useUser, useAuth, UserButton } from "@clerk/nextjs";
+import { useUser, UserButton } from "@clerk/nextjs";
 import { connectSocket, getSocket } from "@/lib/socket";
 import type { Socket } from "socket.io-client";
 import CodeEditor, { type Issue } from "@/components/CodeEditor";
@@ -42,7 +42,6 @@ export default function RoomPage() {
   const { id: roomId } = useParams<{ id: string }>();
   const router = useRouter();
   const { user } = useUser();
-  const { getToken } = useAuth();
   const [socket, setSocket] = useState<Socket | null>(getSocket());
 
   const userName =
@@ -72,15 +71,10 @@ export default function RoomPage() {
   // True once the socket gives us real live state — DB load should not override it
   const socketGaveData    = useRef(false);
 
-  // ── Socket auth ─────────────────────────────────────────────────────────────
-  // Get Clerk session token and (re)connect the socket with it so the server
-  // can verify every connection is from an authenticated user.
+  // ── Socket connect ───────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!user) return;
-    getToken().then((token) => {
-      if (token) setSocket(connectSocket(token));
-    });
-  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
+    setSocket(connectSocket());
+  }, []);
 
   // ── DB load on mount ────────────────────────────────────────────────────────
   // Fetch persisted room state from Supabase. If the room doesn't exist yet
