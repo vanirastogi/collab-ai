@@ -1,11 +1,7 @@
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const groq = new OpenAI({
-  baseURL: "https://api.groq.com/openai/v1",
-  apiKey:  process.env.GROQ_API_KEY,
-});
-
-const REVIEW_MODEL = "llama-3.3-70b-versatile";
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const REVIEW_MODEL = "gemini-1.5-flash";
 
 const SYSTEM_PROMPT = `You are a senior code reviewer. Analyse the code and return ONLY valid JSON in this exact shape, with no markdown fences or extra text:
 {
@@ -42,20 +38,16 @@ export async function POST(req: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const completion = await groq.chat.completions.create({
-          model:  REVIEW_MODEL,
-          stream: true,
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            {
-              role:    "user",
-              content: `Language: ${language}\n\n\`\`\`${language}\n${code}\n\`\`\``,
-            },
-          ],
+        const model = genAI.getGenerativeModel({ 
+          model: REVIEW_MODEL,
+          systemInstruction: SYSTEM_PROMPT 
         });
 
-        for await (const chunk of completion) {
-          const token = chunk.choices[0]?.delta?.content ?? "";
+        const promptText = `Language: ${language}\n\n\`\`\`${language}\n${code}\n\`\`\``;
+        const result = await model.generateContentStream(promptText);
+
+        for await (const chunk of result.stream) {
+          const token = chunk.text();
           if (token) {
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify(token)}\n\n`)

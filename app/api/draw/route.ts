@@ -1,11 +1,7 @@
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const groq = new OpenAI({
-  baseURL: "https://api.groq.com/openai/v1",
-  apiKey:  process.env.GROQ_API_KEY,
-});
-
-const DRAW_MODEL = "llama-3.3-70b-versatile";
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const DRAW_MODEL = "gemini-1.5-flash";
 
 const SYSTEM_PROMPT = `You are a diagramming assistant. Output ONLY a valid JSON array — no markdown, no explanation, no prose.
 Each element must be exactly one of:
@@ -35,19 +31,14 @@ export async function POST(req: Request) {
   }
 
   try {
-    const completion = await groq.chat.completions.create({
-      model:  DRAW_MODEL,
-      stream: false,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        {
-          role:    "user",
-          content: `Existing boxes on canvas: ${context || "none"}\n\nCommand: ${command}`,
-        },
-      ],
+    const model = genAI.getGenerativeModel({ 
+      model: DRAW_MODEL,
+      systemInstruction: SYSTEM_PROMPT
     });
 
-    const raw   = completion.choices[0]?.message?.content?.trim() ?? "[]";
+    const promptText = `Existing boxes on canvas: ${context || "none"}\n\nCommand: ${command}`;
+    const result = await model.generateContent(promptText);
+    const raw = result.response.text().trim();
     const start = raw.indexOf("[");
     const end   = raw.lastIndexOf("]");
     if (start === -1 || end === -1 || end < start) {
