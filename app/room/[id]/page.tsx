@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useUser, UserButton } from "@clerk/nextjs";
 import { connectSocket, getSocket } from "@/lib/socket";
 import type { Socket } from "socket.io-client";
-import CodeEditor, { type Issue } from "@/components/CodeEditor";
+import CodeEditor, { type Issue, type CodeEditorHandle } from "@/components/CodeEditor";
 import Whiteboard, { type DrawObject } from "@/components/Whiteboard";
 import AIPanel from "@/components/AIPanel";
 import DSALadder from "@/components/DSALadder";
@@ -61,15 +61,14 @@ export default function RoomPage() {
   const [dbLoaded,       setDbLoaded]       = useState(false);
 
   // Timer refs — never cause re-renders
-  const autoReviewTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const codeSaveTimer     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wbSaveTimer       = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestCode        = useRef(code);
   const latestLanguage    = useRef(language);
   const latestWb          = useRef(whiteboardData);
-  const [reviewTrigger,  setReviewTrigger]  = useState(0);
   // True once the socket gives us real live state — DB load should not override it
   const socketGaveData    = useRef(false);
+  // Ref to CodeEditor instance so we can push external code into Monaco directly
+  const editorRef         = useRef<CodeEditorHandle>(null);
 
   // ── Socket connect ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -83,6 +82,14 @@ export default function RoomPage() {
     if (!roomId || !user) return;
 
     async function loadOrCreate() {
+      // Seed editor immediately from localStorage so there's no blank flash
+      const localCode = localStorage.getItem(`room-code-${roomId}`);
+      if (localCode && !socketGaveData.current) {
+        setCode(localCode);
+        editorRef.current?.setEditorValue(localCode);
+        setSaveStatus("unsaved");
+      }
+
       const res = await fetch(`/api/rooms/${roomId}`);
 
       if (res.ok) {
@@ -93,7 +100,12 @@ export default function RoomPage() {
         // came back empty (server restart, no active users), DB is the source
         // of truth.
         if (!socketGaveData.current) {
-          if (data.code)      setCode(data.code);
+          // DB wins over localStorage (DB has the last explicitly saved version)
+          if (data.code) {
+            setCode(data.code);
+            editorRef.current?.setEditorValue(data.code);
+            setSaveStatus("saved");
+          }
           if (data.language)  setLanguage(data.language);
           if (data.whiteboard && JSON.stringify(data.whiteboard) !== "{}") {
             setWhiteboardData(JSON.stringify(data.whiteboard));
@@ -141,6 +153,9 @@ export default function RoomPage() {
       // Live data = other users are present, or the server has code/whiteboard in memory.
       if (state.userCount > 1 || state.code || state.whiteboardData) {
         socketGaveData.current = true;
+        // Push into Monaco directly — setCode alone doesn't update the editor
+        // because Monaco uses defaultValue (one-time only).
+        if (state.code) editorRef.current?.setEditorValue(state.code);
       }
       setCode(state.code);
       setLanguage(state.language);
@@ -206,27 +221,31 @@ export default function RoomPage() {
     }
   }
 
-  // ── Debounced code-change handler ────────────────────────────────────────────
-  // Two separate debounces share this handler:
-  //   • AI review fires after 3 s of no typing
-  //   • DB save fires after 2 s of no typing (faster = less data loss on refresh)
+  // ── Explicit save (Ctrl+S or Save button) ───────────────────────────────────
+  const handleSave = useCallback(async () => {
+    await saveToDb({ code: latestCode.current, language: latestLanguage.current });
+  }, [saveToDb]);
+
+  // Ctrl+S keyboard shortcut
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        handleSave();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleSave]);
+
+  // ── Code change handler ──────────────────────────────────────────────────────
+  // Saves to localStorage instantly (no network). DB only on explicit save.
   function handleCodeChange(newCode: string) {
     setCode(newCode);
     setSaveStatus("unsaved");
 
-    // AI review debounce (3 s)
-    if (autoReviewTimer.current) clearTimeout(autoReviewTimer.current);
-    autoReviewTimer.current = setTimeout(() => {
-      autoReviewTimer.current = null;
-      setReviewTrigger((n) => n + 1);
-    }, 3000);
-
-    // DB save debounce (2 s)
-    if (codeSaveTimer.current) clearTimeout(codeSaveTimer.current);
-    codeSaveTimer.current = setTimeout(() => {
-      codeSaveTimer.current = null;
-      saveToDb({ code: latestCode.current, language: latestLanguage.current });
-    }, 2000);
+    // Persist locally on every keystroke — instant, no network
+    localStorage.setItem(`room-code-${roomId}`, newCode);
   }
 
   // ── Debounced whiteboard-change handler ──────────────────────────────────────
@@ -304,8 +323,8 @@ export default function RoomPage() {
         {/* Spacer */}
         <div className="flex-1" />
 
-        {/* Save indicator */}
-        <SaveIndicator status={saveStatus} />
+        {/* Save indicator + explicit save button */}
+        <SaveIndicator status={saveStatus} onSave={handleSave} />
 
         <HeaderDivider />
 
@@ -354,6 +373,7 @@ export default function RoomPage() {
 
             <div className="flex-1 min-h-0 p-3 flex">
               <CodeEditor
+                ref={editorRef}
                 socket={socket}
                 roomId={roomId}
                 code={code}
@@ -428,7 +448,6 @@ export default function RoomPage() {
             onIssuesFound={setIssues}
             onDrawObjects={handleDrawObjects}
             whiteboardData={whiteboardData}
-            autoTrigger={reviewTrigger}
           />
         </aside>
 
@@ -440,7 +459,7 @@ export default function RoomPage() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function SaveIndicator({ status }: { status: SaveStatus }) {
+function SaveIndicator({ status, onSave }: { status: SaveStatus; onSave: () => void }) {
   if (status === "saved") {
     return (
       <span className="text-[11px] text-gray-600 flex items-center gap-1">
@@ -457,12 +476,16 @@ function SaveIndicator({ status }: { status: SaveStatus }) {
       </span>
     );
   }
-  // unsaved
+  // unsaved — show clickable save button
   return (
-    <span className="text-[11px] text-gray-600 flex items-center gap-1">
+    <button
+      onClick={onSave}
+      className="text-[11px] text-amber-400 flex items-center gap-1 hover:text-amber-300 transition-colors"
+      title="Save to cloud (Ctrl+S)"
+    >
       <span className="w-1.5 h-1.5 rounded-full bg-amber-500 inline-block" />
-      Unsaved
-    </span>
+      Save
+    </button>
   );
 }
 

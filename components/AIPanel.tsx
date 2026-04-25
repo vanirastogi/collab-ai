@@ -30,7 +30,7 @@
 // So after decoding bytes to string we split on newlines, look for lines
 // starting with "data: ", strip the prefix, and JSON.parse the token value.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import type { Issue } from "@/components/CodeEditor";
 import type { DrawObject } from "@/app/api/draw/route";
 
@@ -53,8 +53,6 @@ interface AIPanelProps {
   onDrawObjects:   (objects: DrawObject[]) => void;
   /** Raw Fabric.js canvas JSON — used to extract labels for AI context. */
   whiteboardData?: string;
-  /** Incremented by the parent each time an auto-review should fire. */
-  autoTrigger?:    number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -145,7 +143,6 @@ export default function AIPanel({
   onIssuesFound,
   onDrawObjects,
   whiteboardData,
-  autoTrigger,
 }: AIPanelProps) {
   const [tab,         setTab]         = useState<Tab>("review");
   const [status,      setStatus]      = useState<ReviewStatus>("idle");
@@ -160,13 +157,6 @@ export default function AIPanel({
   // AbortController ref lets us cancel an in-flight request if the user
   // clicks "Review" again before the previous one finishes.
   const abortRef = useRef<AbortController | null>(null);
-
-  // ── Auto-review trigger ────────────────────────────────────────────────────
-  // The parent increments autoTrigger after the debounce fires. Skip 0 (mount).
-  useEffect(() => {
-    if (!autoTrigger) return;
-    startReview();
-  }, [autoTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Stream reader ──────────────────────────────────────────────────────────
   async function startReview() {
