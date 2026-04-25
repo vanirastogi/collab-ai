@@ -1,11 +1,7 @@
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const groq = new OpenAI({
-  baseURL: "https://api.groq.com/openai/v1",
-  apiKey:  process.env.GROQ_API_KEY,
-});
-
-const ANALYZE_MODEL = "llama-3.3-70b-versatile";
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const ANALYZE_MODEL = "gemini-1.5-flash";
 
 const SYSTEM_PROMPT =
   "You are a software architect. The user describes a diagram on a whiteboard. " +
@@ -26,17 +22,17 @@ export async function POST(req: Request) {
   }
 
   try {
-    const completion = await groq.chat.completions.create({
-      model:      ANALYZE_MODEL,
-      stream:     false,
-      max_tokens: 200,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user",   content: description },
-      ],
+    const model = genAI.getGenerativeModel({
+      model: ANALYZE_MODEL,
+      systemInstruction: SYSTEM_PROMPT
     });
 
-    const analysis = completion.choices[0]?.message?.content?.trim() ?? "";
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: description }] }],
+      generationConfig: { maxOutputTokens: 200 }
+    });
+
+    const analysis = result.response.text().trim();
     return Response.json({ analysis });
   } catch (err) {
     console.error("[/api/analyze] Groq error:", err);
