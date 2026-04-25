@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const DRAW_MODEL = "gemini-1.5-flash";
+const DRAW_MODEL = "gemini-2.5-flash";
 
 const SYSTEM_PROMPT = `You are a diagramming assistant. Output ONLY a valid JSON array — no markdown, no explanation, no prose.
 Each element must be exactly one of:
@@ -33,7 +33,8 @@ export async function POST(req: Request) {
   try {
     const model = genAI.getGenerativeModel({ 
       model: DRAW_MODEL,
-      systemInstruction: SYSTEM_PROMPT
+      systemInstruction: SYSTEM_PROMPT,
+      generationConfig: { responseMimeType: "application/json" }
     });
 
     const promptText = `Existing boxes on canvas: ${context || "none"}\n\nCommand: ${command}`;

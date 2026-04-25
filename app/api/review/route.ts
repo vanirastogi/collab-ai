@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const REVIEW_MODEL = "gemini-1.5-flash";
+const REVIEW_MODEL = "gemini-2.5-flash";
 
 const SYSTEM_PROMPT = `You are a senior code reviewer. Analyse the code and return ONLY valid JSON in this exact shape, with no markdown fences or extra text:
 {
@@ -40,7 +40,8 @@ export async function POST(req: Request) {
       try {
         const model = genAI.getGenerativeModel({ 
           model: REVIEW_MODEL,
-          systemInstruction: SYSTEM_PROMPT 
+          systemInstruction: SYSTEM_PROMPT,
+          generationConfig: { responseMimeType: "application/json" }
         });
 
         const promptText = `Language: ${language}\n\n\`\`\`${language}\n${code}\n\`\`\``;

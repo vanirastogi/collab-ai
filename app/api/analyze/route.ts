@@ -1,7 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-const ANALYZE_MODEL = "gemini-1.5-flash";
+const ANALYZE_MODEL = "gemini-2.5-flash";
 
 const SYSTEM_PROMPT =
   "You are a software architect. The user describes a diagram on a whiteboard. " +
