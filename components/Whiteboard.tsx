@@ -58,6 +58,8 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
   const disposalRef  = useRef<Promise<boolean | void>>(Promise.resolve());
   const FabricPoint  = useRef<typeof import("fabric").Point | null>(null);
   const socketRef    = useRef(socket);
+  const isDrawing    = useRef(false);   // true while user has mouse held down drawing
+  const [canvasReady, setCanvasReady] = useState(false);
 
   // Tracks label → center position of every AI-drawn box so arrows can connect them.
   const labelPositions = useRef<Map<string, { cx: number; cy: number }>>(new Map());
@@ -163,6 +165,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       // Middle-mouse or Space+drag → pan; left-click → shape tool
       fc.on("mouse:down", (opt) => {
         const e = opt.e as MouseEvent;
+        isDrawing.current = true;
         const isMiddle    = e.button === 1;
         const isSpaceDrag = isSpaceDown.current && e.button === 0;
         if (isMiddle || isSpaceDrag) {
@@ -229,6 +232,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       });
 
       fc.on("mouse:up", (opt) => {
+        isDrawing.current = false;
         if (isPanning.current) {
           isPanning.current = false;
           fc.setCursor(isSpaceDown.current ? "grab" : "crosshair");
@@ -312,16 +316,8 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       fc.on("after:render", syncGrid);
       syncGrid();
 
-      // ── Late-joiner: load existing room state ─────────────────────────────
-      if (initialData) {
-        isReceiving.current = true;
-        try {
-          await fc.loadFromJSON(JSON.parse(initialData));
-          fc.requestRenderAll();
-        } finally {
-          isReceiving.current = false;
-        }
-      }
+      // Signal that the canvas is ready to receive data
+      setCanvasReady(true);
 
       // ── Emit local changes ────────────────────────────────────────────────
       function emitChange() {
@@ -358,11 +354,30 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Load persisted room state once canvas is ready and data has arrived ────
+  // The canvas init runs immediately but initialData arrives async (from DB).
+  // This effect waits for both before loading so we don't get a blank board.
+  useEffect(() => {
+    if (!canvasReady || !initialData) return;
+    const fc = fabricRef.current;
+    if (!fc) return;
+    isReceiving.current = true;
+    fc.loadFromJSON(JSON.parse(initialData))
+      .then(() => { fc.requestRenderAll(); })
+      .catch(() => {})
+      .finally(() => { isReceiving.current = false; });
+  }, [canvasReady, initialData]);
+
   // ── Incoming whiteboard updates ────────────────────────────────────────────
   useEffect(() => {
     async function onWhiteboardChange(data: string) {
       const fc = fabricRef.current;
       if (!fc) return;
+
+      // Don't overwrite canvas while the user is actively drawing — their
+      // stroke would vanish mid-draw. The next update after they lift the
+      // mouse will bring the canvas back in sync.
+      if (isDrawing.current) return;
 
       if (!data) {
         fc.clear();
