@@ -226,7 +226,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
     ytextRef.current = ytext;
 
     // Once initial sync completes, seed from DB/socket if Yjs is still empty
-    provider.on("synced", () => {
+    provider.on("sync", () => {
       const pending = pendingInitialCode.current;
       if (pending && ytext.toString() === "") {
         ytext.insert(0, pending);
