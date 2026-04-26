@@ -249,11 +249,13 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
       fc.on("mouse:move", (opt) => {
         const e = opt.e as MouseEvent;
 
-        // opt.absolutePointer is Fabric's own world-space coordinate — it
-        // correctly accounts for viewport transform, CSS layout, and device
-        // pixel ratio.  Using e.offsetX/Y directly breaks on smaller screens
-        // because offsetX/Y can go out of range during pointer-captured drag.
-        const wp = opt.absolutePointer;
+        // opt.pointer is Fabric's own DPR-corrected, CSS-layout-adjusted canvas
+        // coordinate — more reliable than e.offsetX/Y which breaks when the
+        // pointer is captured outside the canvas on smaller screens.
+        // Convert to world space by undoing the viewport transform.
+        const sp = opt.pointer;
+        const vt = fc.viewportTransform!;
+        const wp = sp ? { x: (sp.x - vt[4]) / vt[0], y: (sp.y - vt[5]) / vt[3] } : null;
 
         // Broadcast cursor position via awareness — use world coords so
         // peers with different pan/zoom see the cursor at the right position
