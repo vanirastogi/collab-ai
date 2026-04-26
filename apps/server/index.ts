@@ -47,6 +47,7 @@ const io = new Server(httpServer, {
     origin: "*",
     methods: ["GET", "POST"],
   },
+  destroyUpgrade: false,
 });
 
 // ─── Yjs WebSocket server ─────────────────────────────────────────────────────
