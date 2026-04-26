@@ -76,6 +76,11 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
   const partialStrokesRef = useRef(
     new Map<string, { points: { x: number; y: number }[]; color: string; width: number }>()
   );
+  // Remote cursor world-space positions — rendered in after:render, not as CSS divs,
+  // so they correctly reposition when the local user pans or zooms
+  const remoteCursorWorldRef = useRef(
+    new Map<number, { x: number; y: number; color: string }>()
+  );
 
   // Yjs refs
   const yobjectsRef   = useRef<import("yjs").Map<string> | null>(null);
@@ -85,13 +90,10 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
   const initialDataRef = useRef(initialData);
   const onWbChangeRef  = useRef(onWhiteboardChange);
 
-  const [tool,          setTool]          = useState<Tool>("draw");
-  const [color,         setColor]         = useState("#ffffff");
-  const [brushSize,     setBrushSize]     = useState(4);
-  const [zoom,          setZoom]          = useState(100);
-  const [remoteCursors, setRemoteCursors] = useState<
-    Array<{ id: number; x: number; y: number; color: string }>
-  >([]);
+  const [tool,      setTool]      = useState<Tool>("draw");
+  const [color,     setColor]     = useState("#ffffff");
+  const [brushSize, setBrushSize] = useState(4);
+  const [zoom,      setZoom]      = useState(100);
 
   // Keep refs in sync with latest prop values
   useEffect(() => { initialDataRef.current = initialData; }, [initialData]);
@@ -247,12 +249,14 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
       fc.on("mouse:move", (opt) => {
         const e = opt.e as MouseEvent;
 
-        // Broadcast cursor position via awareness
+        // Broadcast cursor position via awareness — use world coords so
+        // peers with different pan/zoom see the cursor at the right position
         const provider = providerRef.current;
         if (provider) {
+          const wp = toCanvas(e);
           provider.awareness.setLocalStateField("cursor", {
-            x: e.offsetX,
-            y: e.offsetY,
+            x: wp.x,
+            y: wp.y,
             color: CURSOR_COLORS[provider.awareness.clientID % CURSOR_COLORS.length],
           });
         }
@@ -390,15 +394,19 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
       fc.on("after:render", syncGrid);
       syncGrid();
 
-      // Draw peers' in-progress strokes on top of the Fabric canvas every frame.
-      // We use Fabric's own 2D context (with viewport transform applied) so they
-      // appear in the correct position even when the user pans or zooms.
+      // Draw peers' in-progress strokes AND cursors on top of the Fabric canvas
+      // every frame.  Both use world-space coordinates, so we apply the viewport
+      // transform once and everything stays aligned regardless of pan/zoom.
       fc.on("after:render", ({ ctx }: { ctx: CanvasRenderingContext2D }) => {
-        const strokes = partialStrokesRef.current;
-        if (strokes.size === 0) return;
+        const strokes  = partialStrokesRef.current;
+        const cursors  = remoteCursorWorldRef.current;
+        if (strokes.size === 0 && cursors.size === 0) return;
+
         const vt = fc.viewportTransform!;
         ctx.save();
         ctx.transform(vt[0], vt[1], vt[2], vt[3], vt[4], vt[5]);
+
+        // ── partial strokes ───────────────────────────────────────────────────
         for (const stroke of Array.from(strokes.values())) {
           if (stroke.points.length < 2) continue;
           ctx.beginPath();
@@ -412,6 +420,21 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
           }
           ctx.stroke();
         }
+
+        // ── remote cursors (world-space dots) ────────────────────────────────
+        // Radius in world units so it stays ~6 px regardless of zoom
+        const z = fc.getZoom();
+        const r = 6 / z;
+        for (const { x, y, color } of Array.from(cursors.values())) {
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, Math.PI * 2);
+          ctx.fillStyle   = color;
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth   = 1.5 / z;
+          ctx.fill();
+          ctx.stroke();
+        }
+
         ctx.restore();
       });
 
@@ -566,15 +589,17 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
       }
       sock?.on("wb:point", onWbPoint);
 
-      // Live cursors: receive other users' cursor positions from awareness
+      // Live cursors: store peers' world-space positions in a ref and redraw.
+      // Using a ref (not state) avoids React re-renders on every mouse move.
       provider.awareness.on("change", () => {
-        const cursors: Array<{ id: number; x: number; y: number; color: string }> = [];
+        const map = remoteCursorWorldRef.current;
+        map.clear();
         provider.awareness.getStates().forEach((state, clientId) => {
           if (clientId === provider.awareness.clientID) return;
           const c = state.cursor as { x: number; y: number; color: string } | undefined;
-          if (c) cursors.push({ id: clientId, x: c.x, y: c.y, color: c.color ?? "#4ade80" });
+          if (c) map.set(clientId, { x: c.x, y: c.y, color: c.color ?? "#4ade80" });
         });
-        setRemoteCursors(cursors);
+        fc.requestRenderAll(); // triggers after:render which draws cursor dots
       });
 
       return () => {
@@ -806,25 +831,6 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
         }}
       >
         <canvas ref={canvasElRef} />
-
-        {/* Render a coloured dot for each remote user's cursor */}
-        {remoteCursors.map((cursor) => (
-          <div
-            key={cursor.id}
-            className="absolute pointer-events-none z-50"
-            style={{
-              left:       cursor.x,
-              top:        cursor.y,
-              transform:  "translate(-5px, -5px)",
-              transition: "left 50ms linear, top 50ms linear",
-            }}
-          >
-            <div
-              className="w-3 h-3 rounded-full border-2 border-white shadow-md"
-              style={{ background: cursor.color }}
-            />
-          </div>
-        ))}
       </div>
 
       {/* ── Hint bar ─────────────────────────────────────────────────────── */}

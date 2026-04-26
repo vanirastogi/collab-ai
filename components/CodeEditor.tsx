@@ -223,12 +223,18 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEd
     const ytext   = ydoc.getText("monaco");
     const provider = new WebsocketProvider(`${wsUrl}/yjs`, roomId, ydoc);
 
-    ytextRef.current = ytext;
-
-    // Once initial sync completes, seed from DB/socket if Yjs is still empty
-    provider.on("sync", () => {
+    // Only expose ytext to the parent AFTER the initial Yjs sync completes.
+    // This ensures any setEditorValue() call that arrives before sync is stored
+    // in pendingInitialCode and applied once we know whether Yjs is empty.
+    // If ytextRef is set before sync, User B could overwrite User A's live code
+    // with the (stale) DB version before the CRDT document has had a chance to
+    // pull the remote state.
+    provider.on("sync", (isSynced: boolean) => {
+      if (!isSynced) return;
+      ytextRef.current = ytext;
       const pending = pendingInitialCode.current;
       if (pending && ytext.toString() === "") {
+        // Room was brand-new: seed from DB / socket initial state
         ytext.insert(0, pending);
         pendingInitialCode.current = null;
       }
