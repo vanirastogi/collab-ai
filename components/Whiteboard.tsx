@@ -399,7 +399,7 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
         const vt = fc.viewportTransform!;
         ctx.save();
         ctx.transform(vt[0], vt[1], vt[2], vt[3], vt[4], vt[5]);
-        for (const stroke of strokes.values()) {
+        for (const stroke of Array.from(strokes.values())) {
           if (stroke.points.length < 2) continue;
           ctx.beginPath();
           ctx.strokeStyle = stroke.color;
@@ -474,7 +474,7 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
         const canvas = fabricRef.current;
         if (!canvas) return;
 
-        for (const [id, change] of event.changes.keys) {
+        for (const [id, change] of Array.from(event.changes.keys)) {
           if (change.action === "add" || change.action === "update") {
             const serialized = yobjects.get(id);
             if (!serialized) continue;
