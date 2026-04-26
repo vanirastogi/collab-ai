@@ -136,17 +136,6 @@ io.on("connection", (rawSocket: Socket) => {
     socket.to(roomId).emit("language-change", language);
   });
 
-  // ── whiteboard-change ──────────────────────────────────────────────────────
-  socket.on(
-    "whiteboard-change",
-    ({ roomId, whiteboardData }: WhiteboardChangePayload) => {
-      if (!roomId || !rooms[roomId]) return;
-
-      rooms[roomId].whiteboardData = whiteboardData;
-      socket.to(roomId).emit("whiteboard-change", whiteboardData);
-    }
-  );
-
   // ── cursor-move ────────────────────────────────────────────────────────────
   socket.on(
     "cursor-move",
@@ -156,6 +145,15 @@ io.on("connection", (rawSocket: Socket) => {
       socket.to(roomId).emit("cursor-move", { userId: socket.id, position });
     }
   );
+
+  // ── wb:point — stream freehand stroke points to peers in real time ─────────
+  // This is ephemeral (not stored); Yjs handles the final persisted object.
+  socket.on("wb:point", ({ roomId, strokeId, x, y, color, width }: {
+    roomId: string; strokeId: string; x: number; y: number; color: string; width: number;
+  }) => {
+    if (!roomId) return;
+    socket.to(roomId).emit("wb:point", { strokeId, x, y, color, width });
+  });
 
   // ── dsa:solve ──────────────────────────────────────────────────────────────
   socket.on('dsa:solve', ({ roomId, problemId, userId, userName }) => {

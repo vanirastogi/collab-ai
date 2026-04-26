@@ -1,33 +1,30 @@
 "use client";
 
-/**
- * Why dynamic import for Fabric.js?
- *
- * Fabric reads `window`, `document`, and `HTMLCanvasElement` the moment the
- * module is evaluated — not lazily inside a class or function. In Next.js,
- * every page is first rendered on the server (Node.js), where none of those
- * browser globals exist. A top-level `import { Canvas } from 'fabric'` would
- * crash the server with "window is not defined" before any React code runs.
- *
- * By moving the import inside a useEffect we guarantee it only executes in
- * the browser, after hydration, when the real DOM is available.
- */
-
 import { useEffect, useRef, useState } from "react";
-import type { Socket } from "socket.io-client";
 import type { Canvas as FabricCanvas, PencilBrush as FabricPencilBrush } from "fabric";
 import type { DrawObject } from "@/app/api/draw/route";
+import { getSocket } from "@/lib/socket";
 
 export type { DrawObject };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface WhiteboardProps {
-  socket:       Socket | null;
-  roomId:       string;
-  initialData?: string;
-  /** Set by the parent each time the AI produces new objects to draw. */
-  drawCommand?: { objects: DrawObject[]; id: number } | null;
+  roomId:              string;
+  initialData?:        string;
+  drawCommand?:        { objects: DrawObject[]; id: number } | null;
+  onWhiteboardChange?: (data: string) => void;
+}
+
+interface YjsProvider {
+  awareness: {
+    clientID: number;
+    setLocalStateField: (field: string, value: unknown) => void;
+    getStates: () => Map<number, Record<string, unknown>>;
+    on: (event: string, cb: (...args: unknown[]) => void) => void;
+  };
+  on: (event: string, cb: (synced: boolean) => void) => void;
+  disconnect: () => void;
 }
 
 type Tool = "draw" | "select" | "rect" | "line" | "text";
@@ -39,14 +36,22 @@ const PRESET_COLORS = [
   "#4ade80", "#38bdf8", "#818cf8", "#f472b6",
 ];
 
-const BG          = "#18181b";
-const GRID_PX     = 30;   // dot spacing at zoom=1
-const MIN_ZOOM    = 0.05;
-const MAX_ZOOM    = 20;
+const CURSOR_COLORS = [
+  "#f87171", "#fb923c", "#facc15", "#4ade80",
+  "#38bdf8", "#818cf8", "#c084fc", "#f472b6",
+];
+
+const BG       = "#18181b";
+const GRID_PX  = 30;
+const MIN_ZOOM = 0.05;
+const MAX_ZOOM = 20;
+
+let _seq = 0;
+function nextId() { return `${Date.now()}-${++_seq}-${Math.random().toString(36).slice(2, 7)}`; }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function Whiteboard({ socket, roomId, initialData, drawCommand }: WhiteboardProps) {
+export default function Whiteboard({ roomId, initialData, drawCommand, onWhiteboardChange }: WhiteboardProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasElRef  = useRef<HTMLCanvasElement>(null);
   const fabricRef    = useRef<FabricCanvas | null>(null);
@@ -57,39 +62,113 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
   const lastPan      = useRef({ x: 0, y: 0 });
   const disposalRef  = useRef<Promise<boolean | void>>(Promise.resolve());
   const FabricPoint  = useRef<typeof import("fabric").Point | null>(null);
-  const socketRef    = useRef(socket);
-  const isDrawing    = useRef(false);   // true while user has mouse held down drawing
-  const [canvasReady, setCanvasReady] = useState(false);
+  const isDrawing    = useRef(false);
 
-  // Tracks label → center position of every AI-drawn box so arrows can connect them.
   const labelPositions = useRef<Map<string, { cx: number; cy: number }>>(new Map());
+  const toolRef        = useRef<Tool>("draw");
+  const colorRef       = useRef("#ffffff");
+  const shapeStartRef  = useRef<{ x: number; y: number } | null>(null);
+  const previewRef     = useRef<object | null>(null);
+  const isShaping      = useRef(false);
 
-  // Shape-drawing state — used by rect/line/text tools.
-  const toolRef       = useRef<Tool>("draw");
-  const colorRef      = useRef("#ffffff"); // mirrors the initial color useState value
-  const shapeStartRef = useRef<{ x: number; y: number } | null>(null);
-  const previewRef    = useRef<object | null>(null);
-  const isShaping     = useRef(false);
+  // In-progress stroke streaming (Socket.IO — ephemeral, lossy-OK)
+  const currentStrokeId   = useRef("");
+  const partialStrokesRef = useRef(
+    new Map<string, { points: { x: number; y: number }[]; color: string; width: number }>()
+  );
 
-  const [tool,      setTool]      = useState<Tool>("draw");
-  const [color,     setColor]     = useState("#ffffff");
-  const [brushSize, setBrushSize] = useState(4);
-  const [zoom,      setZoom]      = useState(100);
+  // Yjs refs
+  const yobjectsRef   = useRef<import("yjs").Map<string> | null>(null);
+  const ymetaRef      = useRef<import("yjs").Map<string> | null>(null);
+  const ydocRef       = useRef<import("yjs").Doc | null>(null);
+  const providerRef   = useRef<YjsProvider | null>(null);
+  const initialDataRef = useRef(initialData);
+  const onWbChangeRef  = useRef(onWhiteboardChange);
 
-  // Keep socketRef current so closures inside canvas init always see latest socket
-  useEffect(() => { socketRef.current = socket; }, [socket]);
+  const [tool,          setTool]          = useState<Tool>("draw");
+  const [color,         setColor]         = useState("#ffffff");
+  const [brushSize,     setBrushSize]     = useState(4);
+  const [zoom,          setZoom]          = useState(100);
+  const [remoteCursors, setRemoteCursors] = useState<
+    Array<{ id: number; x: number; y: number; color: string }>
+  >([]);
 
-  // ── Canvas init ────────────────────────────────────────────────────────────
+  // Keep refs in sync with latest prop values
+  useEffect(() => { initialDataRef.current = initialData; }, [initialData]);
+  useEffect(() => { onWbChangeRef.current  = onWhiteboardChange; }, [onWhiteboardChange]);
+  useEffect(() => { toolRef.current  = tool;  }, [tool]);
+  useEffect(() => { colorRef.current = color; }, [color]);
+
+  // ── Brush sync ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const b = brushRef.current;
+    if (!b) return;
+    b.color = color;
+    b.width = brushSize;
+  }, [color, brushSize]);
+
+  // ── Tool mode sync ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const fc = fabricRef.current;
+    if (!fc) return;
+    fc.isDrawingMode = tool === "draw";
+    fc.selection     = tool === "select";
+    fc.defaultCursor =
+      tool === "text"   ? "text"
+      : tool === "rect" || tool === "line" ? "crosshair"
+      : tool === "draw" ? "crosshair"
+      : "default";
+    fc.getObjects().forEach((o) => {
+      o.selectable = tool === "select";
+      o.evented    = tool === "select";
+    });
+    fc.requestRenderAll();
+  }, [tool]);
+
+  // ── AI draw command ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!drawCommand?.objects.length) return;
+    void addDrawObjects(drawCommand.objects);
+  }, [drawCommand]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Apply initialData when Yjs is ready but empty (late DB load) ────────────
+  useEffect(() => {
+    if (!initialData) return;
+    const yobjects = yobjectsRef.current;
+    if (!yobjects || yobjects.size > 0) return; // not ready or peers already have data
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    void (async () => {
+      isReceiving.current = true;
+      try {
+        await canvas.loadFromJSON(JSON.parse(initialData));
+        canvas.requestRenderAll();
+        // Push initial objects into Yjs with stable index-based IDs
+        canvas.getObjects().forEach((obj, i) => {
+          const id = `init-${i}`;
+          (obj as { data?: { id?: string } }).data = { id };
+          yobjects.set(id, JSON.stringify(
+            (obj as { toJSON: (e?: string[]) => unknown }).toJSON(["data"])
+          ));
+        });
+      } catch {
+        // ignore parse errors
+      } finally {
+        isReceiving.current = false;
+      }
+    })();
+  }, [initialData]);
+
+  // ── Canvas init ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!canvasElRef.current || !containerRef.current) return;
-
     let cancelled = false;
 
     async function init() {
       await disposalRef.current;
       if (cancelled) return;
 
-      const { Canvas, PencilBrush, Point, Rect, Line, IText } = await import("fabric");
+      const { Canvas, PencilBrush, Point, Rect, Line, IText, util } = await import("fabric");
       if (cancelled) return;
       FabricPoint.current = Point;
 
@@ -98,41 +177,27 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       const h = container.clientHeight || window.innerHeight;
 
       const fc = new Canvas(canvasElRef.current!, {
-        // No backgroundColor here — the CSS dot-grid shows through instead.
-        // Fabric clears to transparent each frame, revealing the grid behind.
         isDrawingMode: true,
-        width:  w,
-        height: h,
+        width: w, height: h,
         selection: false,
       });
-
       fabricRef.current = fc;
 
-      // ── Brush ──────────────────────────────────────────────────────────────
       const brush = new PencilBrush(fc);
       brush.color = color;
       brush.width = brushSize;
       fc.freeDrawingBrush = brush;
       brushRef.current = brush;
 
-      // ── Resize: keep canvas filling its container ──────────────────────────
-      // Fabric sets explicit px width/height on its wrapper div, preventing
-      // it from stretching naturally. A ResizeObserver re-stamps the correct
-      // dimensions whenever the container is resized (window resize, panel
-      // toggle, etc.).
+      // Resize observer
       const ro = new ResizeObserver(([entry]) => {
         const { width, height } = entry.contentRect;
-        // Fabric v7: width/height are direct writable properties
-        fc.width  = width;
-        fc.height = height;
+        fc.width = width; fc.height = height;
         fc.calcOffset();
         fc.requestRenderAll();
       });
       ro.observe(container);
 
-      // ── Pan & zoom ────────────────────────────────────────────────────────
-      // Sync the CSS dot-grid position with the Fabric viewport so the grid
-      // appears to scroll with the canvas content, creating an infinite feel.
       function syncGrid() {
         const vt = fc.viewportTransform!;
         const z  = fc.getZoom();
@@ -142,30 +207,26 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
         setZoom(Math.round(z * 100));
       }
 
-      // Fabric v7: opt.e is TPointerEvent = MouseEvent | TouchEvent.
-      // Cast to MouseEvent for mouse-specific properties (button, clientX/Y).
-      // Convert screen coords → canvas (world) coords, accounting for pan/zoom.
       function toCanvas(e: MouseEvent) {
         const vt = fc.viewportTransform!;
         return { x: (e.offsetX - vt[4]) / vt[0], y: (e.offsetY - vt[5]) / vt[3] };
       }
 
-      // Mouse-wheel zoom — zooms toward the cursor position
+      // Zoom
       fc.on("mouse:wheel", (opt) => {
         const e = opt.e as WheelEvent;
-        const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM,
-          fc.getZoom() * (0.999 ** e.deltaY)
-        ));
+        const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, fc.getZoom() * (0.999 ** e.deltaY)));
         fc.zoomToPoint(new Point(e.offsetX, e.offsetY), z);
-        e.preventDefault();
-        e.stopPropagation();
+        e.preventDefault(); e.stopPropagation();
         syncGrid();
       });
 
-      // Middle-mouse or Space+drag → pan; left-click → shape tool
+      // Pan + shape start
       fc.on("mouse:down", (opt) => {
         const e = opt.e as MouseEvent;
         isDrawing.current = true;
+        // Assign a stroke ID so peers can correlate streaming points → final object
+        if (fc.isDrawingMode) currentStrokeId.current = nextId();
         const isMiddle    = e.button === 1;
         const isSpaceDrag = isSpaceDown.current && e.button === 0;
         if (isMiddle || isSpaceDrag) {
@@ -179,12 +240,37 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
         const t = toolRef.current;
         if (t === "rect" || t === "line" || t === "text") {
           shapeStartRef.current = toCanvas(e);
-          isShaping.current     = t !== "text"; // text fires on mouseup, no drag
+          isShaping.current = t !== "text";
         }
       });
 
       fc.on("mouse:move", (opt) => {
         const e = opt.e as MouseEvent;
+
+        // Broadcast cursor position via awareness
+        const provider = providerRef.current;
+        if (provider) {
+          provider.awareness.setLocalStateField("cursor", {
+            x: e.offsetX,
+            y: e.offsetY,
+            color: CURSOR_COLORS[provider.awareness.clientID % CURSOR_COLORS.length],
+          });
+        }
+
+        // Stream freehand path points to peers via Socket.IO so they see
+        // the stroke growing live — before the final object syncs via Yjs
+        if (fc.isDrawingMode && isDrawing.current && currentStrokeId.current) {
+          const p    = toCanvas(e);
+          const sock = getSocket();
+          sock?.emit("wb:point", {
+            roomId,
+            strokeId: currentStrokeId.current,
+            x: p.x, y: p.y,
+            color: colorRef.current,
+            width: brushRef.current?.width ?? 4,
+          });
+        }
+
         if (isPanning.current) {
           fc.relativePan(new Point(e.clientX - lastPan.current.x, e.clientY - lastPan.current.y));
           lastPan.current = { x: e.clientX, y: e.clientY };
@@ -197,7 +283,6 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
         const start = shapeStartRef.current;
         const t     = toolRef.current;
 
-        // Remove old preview without triggering a socket emit
         if (previewRef.current) {
           isReceiving.current = true;
           fc.remove(previewRef.current as Parameters<typeof fc.remove>[0]);
@@ -213,8 +298,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
             width:  Math.abs(curr.x - start.x),
             height: Math.abs(curr.y - start.y),
             fill: "transparent", stroke: colorRef.current, strokeWidth: 2,
-            rx: 4, ry: 4,
-            selectable: false, evented: false,
+            rx: 4, ry: 4, selectable: false, evented: false,
           });
         } else if (t === "line") {
           preview = new Line([start.x, start.y, curr.x, curr.y], {
@@ -232,13 +316,13 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       });
 
       fc.on("mouse:up", (opt) => {
-        isDrawing.current = false;
+        isDrawing.current     = false;
+        currentStrokeId.current = "";
         if (isPanning.current) {
           isPanning.current = false;
           fc.setCursor(isSpaceDown.current ? "grab" : "crosshair");
           return;
         }
-
         const start = shapeStartRef.current;
         if (!start) return;
 
@@ -246,7 +330,6 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
         const curr = toCanvas(e);
         const t    = toolRef.current;
 
-        // Remove preview silently
         if (previewRef.current) {
           isReceiving.current = true;
           fc.remove(previewRef.current as Parameters<typeof fc.remove>[0]);
@@ -272,10 +355,8 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
             fc.add(new Rect({
               left:   Math.min(start.x, curr.x),
               top:    Math.min(start.y, curr.y),
-              width:  Math.abs(dx),
-              height: Math.abs(dy),
-              fill: "transparent", stroke: colorRef.current, strokeWidth: 2,
-              rx: 4, ry: 4,
+              width:  Math.abs(dx), height: Math.abs(dy),
+              fill: "transparent", stroke: colorRef.current, strokeWidth: 2, rx: 4, ry: 4,
             }));
           } else if (t === "line") {
             fc.add(new Line([start.x, start.y, curr.x, curr.y], {
@@ -289,13 +370,11 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
         shapeStartRef.current = null;
       });
 
-      // Space key: temporary pan mode
+      // Space key pan mode
       function onKeyDown(e: KeyboardEvent) {
         if (e.code !== "Space" || e.repeat) return;
         if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-        // Do not intercept if Whiteboard is hidden (Code/DSA tab is active)
         if (!containerRef.current || containerRef.current.offsetParent === null) return;
-        
         isSpaceDown.current = true;
         fc.defaultCursor = "grab";
         fc.setCursor("grab");
@@ -304,39 +383,211 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       function onKeyUp(e: KeyboardEvent) {
         if (e.code !== "Space") return;
         isSpaceDown.current = false;
-        if (!isPanning.current) {
-          fc.defaultCursor = "crosshair";
-          fc.setCursor("crosshair");
-        }
+        if (!isPanning.current) { fc.defaultCursor = "crosshair"; fc.setCursor("crosshair"); }
       }
       window.addEventListener("keydown", onKeyDown);
       window.addEventListener("keyup",   onKeyUp);
-
-      // ── After:render — keep grid in sync ─────────────────────────────────
       fc.on("after:render", syncGrid);
       syncGrid();
 
-      // Signal that the canvas is ready to receive data
-      setCanvasReady(true);
+      // Draw peers' in-progress strokes on top of the Fabric canvas every frame.
+      // We use Fabric's own 2D context (with viewport transform applied) so they
+      // appear in the correct position even when the user pans or zooms.
+      fc.on("after:render", ({ ctx }: { ctx: CanvasRenderingContext2D }) => {
+        const strokes = partialStrokesRef.current;
+        if (strokes.size === 0) return;
+        const vt = fc.viewportTransform!;
+        ctx.save();
+        ctx.transform(vt[0], vt[1], vt[2], vt[3], vt[4], vt[5]);
+        for (const stroke of strokes.values()) {
+          if (stroke.points.length < 2) continue;
+          ctx.beginPath();
+          ctx.strokeStyle = stroke.color;
+          ctx.lineWidth   = stroke.width;
+          ctx.lineCap     = "round";
+          ctx.lineJoin    = "round";
+          ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+          for (let i = 1; i < stroke.points.length; i++) {
+            ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      });
 
-      // ── Emit local changes ────────────────────────────────────────────────
-      function emitChange() {
-        if (isReceiving.current) return;
-        socketRef.current?.emit("whiteboard-change", {
-          roomId,
-          whiteboardData: JSON.stringify(fc.toJSON()),
-        });
+      // ── Per-object Yjs sync ───────────────────────────────────────────────
+      // Each canvas object gets a stable ID in `obj.data.id`.
+      // We push individual adds/modifies/removes to a Y.Map so peers can
+      // apply only the diff — no full-canvas replace, so drawings never vanish.
+
+      function syncObjectToYjs(obj: Parameters<typeof fc.add>[0]) {
+        const yobjects = yobjectsRef.current;
+        if (!yobjects) return;
+        const o = obj as { data?: { id?: string; strokeId?: string }; toJSON: (e?: string[]) => unknown };
+        if (!o.data?.id) {
+          // Tag with both a stable object ID and the stroke ID so the peer
+          // knows which partial stroke to retire when the final object arrives.
+          o.data = { ...(o.data ?? {}), id: nextId(), strokeId: currentStrokeId.current || undefined };
+        }
+        yobjects.set(o.data.id!, JSON.stringify(o.toJSON(["data"])));
+        const json = JSON.stringify(fc.toJSON());
+        localStorage.setItem(`room-wb-${roomId}`, json);
+        onWbChangeRef.current?.(json);
       }
 
-      fc.on("object:added",    emitChange);
-      fc.on("object:modified", emitChange);
-      fc.on("object:removed",  emitChange);
+      fc.on("object:added", (e) => {
+        if (!isReceiving.current) syncObjectToYjs(e.target as Parameters<typeof fc.add>[0]);
+      });
+      fc.on("object:modified", (e) => {
+        if (!isReceiving.current) syncObjectToYjs(e.target as Parameters<typeof fc.add>[0]);
+      });
+      fc.on("object:removed", (e) => {
+        if (isReceiving.current) return;
+        const o = e.target as { data?: { id?: string } };
+        if (o.data?.id) yobjectsRef.current?.delete(o.data.id);
+        const json = JSON.stringify(fc.toJSON());
+        localStorage.setItem(`room-wb-${roomId}`, json);
+        onWbChangeRef.current?.(json);
+      });
 
-      // Cleanup
+      // ── Yjs setup ─────────────────────────────────────────────────────────
+      const [{ Doc }, { WebsocketProvider }] = await Promise.all([
+        import("yjs"),
+        import("y-websocket"),
+      ]);
+      if (cancelled) return;
+
+      const wsUrl    = (process.env.NEXT_PUBLIC_SERVER_URL ?? "ws://localhost:3001").replace(/^http/, "ws");
+      const ydoc     = new Doc();
+      const yobjects = ydoc.getMap<string>("objects");
+      const ymeta    = ydoc.getMap<string>("meta");
+      const provider = new WebsocketProvider(`${wsUrl}/yjs`, `wb-${roomId}`, ydoc) as unknown as YjsProvider;
+
+      ydocRef.current     = ydoc;
+      yobjectsRef.current = yobjects;
+      ymetaRef.current    = ymeta;
+      providerRef.current = provider;
+
+      // Receive per-object diffs from peers (no full canvas replace)
+      yobjects.observe(async (event, txn) => {
+        if (txn.local) return; // our own change — skip
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        for (const [id, change] of event.changes.keys) {
+          if (change.action === "add" || change.action === "update") {
+            const serialized = yobjects.get(id);
+            if (!serialized) continue;
+            try {
+              const parsed = JSON.parse(serialized);
+              // Remove stale version of this object if present
+              const old = canvas.getObjects().find(
+                (o) => (o as { data?: { id?: string } }).data?.id === id
+              );
+              if (old) {
+                isReceiving.current = true;
+                canvas.remove(old);
+                isReceiving.current = false;
+              }
+              // Enliven and add the updated object
+              const enlivened = await util.enlivenObjects([parsed]) as Parameters<typeof canvas.add>[0][];
+              if (enlivened[0]) {
+                const obj = enlivened[0] as { data?: { id?: string; strokeId?: string } } & Parameters<typeof canvas.add>[0];
+                obj.data = { id, strokeId: obj.data?.strokeId };
+                isReceiving.current = true;
+                canvas.add(obj);
+                isReceiving.current = false;
+                // Retire the ephemeral Socket.IO partial stroke now that
+                // the final Yjs object has arrived
+                if (obj.data?.strokeId) {
+                  partialStrokesRef.current.delete(obj.data.strokeId);
+                }
+              }
+            } catch { /* ignore bad JSON */ }
+          } else if (change.action === "delete") {
+            const old = canvas.getObjects().find(
+              (o) => (o as { data?: { id?: string } }).data?.id === id
+            );
+            if (old) {
+              isReceiving.current = true;
+              canvas.remove(old);
+              isReceiving.current = false;
+            }
+          }
+        }
+        canvas.requestRenderAll();
+      });
+
+      // Receive clear signal from peers
+      ymeta.observe((_event, txn) => {
+        if (txn.local) return;
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+        isReceiving.current = true;
+        canvas.clear();
+        canvas.requestRenderAll();
+        isReceiving.current = false;
+      });
+
+      // After initial sync: seed canvas from DB/localStorage if Yjs doc is empty
+      provider.on("sync", async (isSynced) => {
+        if (!isSynced || yobjects.size > 0) return;
+        const seed = initialDataRef.current || localStorage.getItem(`room-wb-${roomId}`);
+        if (!seed) return;
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+        isReceiving.current = true;
+        try {
+          await canvas.loadFromJSON(JSON.parse(seed));
+          canvas.requestRenderAll();
+          // Push all loaded objects to Yjs with stable index-based IDs
+          canvas.getObjects().forEach((obj, i) => {
+            const id = `init-${i}`;
+            (obj as { data?: { id?: string } }).data = { id };
+            yobjects.set(id, JSON.stringify(
+              (obj as { toJSON: (e?: string[]) => unknown }).toJSON(["data"])
+            ));
+          });
+        } catch { /* ignore */ } finally {
+          isReceiving.current = false;
+        }
+      });
+
+      // Receive streaming path points from peers (Socket.IO — ephemeral)
+      const sock = getSocket();
+      function onWbPoint({ strokeId, x, y, color, width }: {
+        strokeId: string; x: number; y: number; color: string; width: number;
+      }) {
+        const stroke = partialStrokesRef.current.get(strokeId)
+          ?? { points: [], color, width };
+        stroke.points.push({ x, y });
+        partialStrokesRef.current.set(strokeId, stroke);
+        fc.requestRenderAll(); // triggers after:render which draws the partial stroke
+      }
+      sock?.on("wb:point", onWbPoint);
+
+      // Live cursors: receive other users' cursor positions from awareness
+      provider.awareness.on("change", () => {
+        const cursors: Array<{ id: number; x: number; y: number; color: string }> = [];
+        provider.awareness.getStates().forEach((state, clientId) => {
+          if (clientId === provider.awareness.clientID) return;
+          const c = state.cursor as { x: number; y: number; color: string } | undefined;
+          if (c) cursors.push({ id: clientId, x: c.x, y: c.y, color: c.color ?? "#4ade80" });
+        });
+        setRemoteCursors(cursors);
+      });
+
       return () => {
         ro.disconnect();
         window.removeEventListener("keydown", onKeyDown);
         window.removeEventListener("keyup",   onKeyUp);
+        sock?.off("wb:point", onWbPoint);
+        provider.disconnect();
+        ydoc.destroy();
+        ydocRef.current     = null;
+        yobjectsRef.current = null;
+        ymetaRef.current    = null;
+        providerRef.current = null;
       };
     }
 
@@ -354,86 +605,7 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Load persisted room state once canvas is ready and data has arrived ────
-  // The canvas init runs immediately but initialData arrives async (from DB).
-  // This effect waits for both before loading so we don't get a blank board.
-  useEffect(() => {
-    if (!canvasReady || !initialData) return;
-    const fc = fabricRef.current;
-    if (!fc) return;
-    isReceiving.current = true;
-    fc.loadFromJSON(JSON.parse(initialData))
-      .then(() => { fc.requestRenderAll(); })
-      .catch(() => {})
-      .finally(() => { isReceiving.current = false; });
-  }, [canvasReady, initialData]);
-
-  // ── Incoming whiteboard updates ────────────────────────────────────────────
-  useEffect(() => {
-    async function onWhiteboardChange(data: string) {
-      const fc = fabricRef.current;
-      if (!fc) return;
-
-      // Don't overwrite canvas while the user is actively drawing — their
-      // stroke would vanish mid-draw. The next update after they lift the
-      // mouse will bring the canvas back in sync.
-      if (isDrawing.current) return;
-
-      if (!data) {
-        fc.clear();
-        fc.requestRenderAll();
-        return;
-      }
-
-      isReceiving.current = true;
-      try {
-        await fc.loadFromJSON(JSON.parse(data));
-        fc.requestRenderAll();
-      } finally {
-        isReceiving.current = false;
-      }
-    }
-
-    if (!socket) return;
-    socket.on("whiteboard-change", onWhiteboardChange);
-    return () => { socket.off("whiteboard-change", onWhiteboardChange); };
-  }, [socket]);
-
-  // ── Sync refs used inside init's closure ─────────────────────────────────
-  useEffect(() => { toolRef.current  = tool;  }, [tool]);
-  useEffect(() => { colorRef.current = color; }, [color]);
-
-  // ── Sync brush ────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const b = brushRef.current;
-    if (!b) return;
-    b.color = color;
-    b.width = brushSize;
-  }, [color, brushSize]);
-
-  // ── Sync tool mode ────────────────────────────────────────────────────────
-  useEffect(() => {
-    const fc = fabricRef.current;
-    if (!fc) return;
-    fc.isDrawingMode  = tool === "draw";
-    fc.selection      = tool === "select";
-    fc.defaultCursor  =
-      tool === "text"   ? "text"
-      : tool === "rect" || tool === "line" ? "crosshair"
-      : tool === "draw" ? "crosshair"
-      : "default";
-    fc.getObjects().forEach((o) => {
-      o.selectable = tool === "select";
-      o.evented    = tool === "select";
-    });
-    fc.requestRenderAll();
-  }, [tool]);
-
   // ── AI draw command ───────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!drawCommand?.objects.length) return;
-    void addDrawObjects(drawCommand.objects);
-  }, [drawCommand]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function addDrawObjects(objects: DrawObject[]) {
     const fc = fabricRef.current;
@@ -444,59 +616,46 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
     const BOX_W = 150;
     const BOX_H = 54;
 
-    // Auto-layout: if multiple boxes arrive together and their positions look
-    // clustered, spread them in a row with even spacing.
     const boxes = objects.filter((o): o is Extract<DrawObject, { type: "box" }> => o.type === "box");
     if (boxes.length > 1) {
       const xs = boxes.map((b) => b.x);
       const spread = Math.max(...xs) - Math.min(...xs);
       if (spread < BOX_W * boxes.length * 0.8) {
-        // Re-space them evenly across the canvas
-        const GAP      = 60;
-        const totalW   = boxes.length * BOX_W + (boxes.length - 1) * GAP;
-        const startX   = Math.max(40, (1200 - totalW) / 2);
-        const baseY    = Math.min(...boxes.map((b) => b.y)) || 300;
-        boxes.forEach((b, i) => {
-          b.x = startX + i * (BOX_W + GAP);
-          b.y = baseY;
-        });
+        const GAP    = 60;
+        const totalW = boxes.length * BOX_W + (boxes.length - 1) * GAP;
+        const startX = Math.max(40, (1200 - totalW) / 2);
+        const baseY  = Math.min(...boxes.map((b) => b.y)) || 300;
+        boxes.forEach((b, i) => { b.x = startX + i * (BOX_W + GAP); b.y = baseY; });
       }
     }
 
-    // Pass 1 — add boxes as a Group (rect + label move together).
     for (const obj of boxes) {
       const x = Math.round(obj.x ?? 200);
       const y = Math.round(obj.y ?? 300);
       const w = Math.round(obj.width  ?? BOX_W);
       const h = Math.round(obj.height ?? BOX_H);
 
-      // Objects inside a Group are positioned relative to the group's center.
       const rect = new Rect({
         left: -(w / 2), top: -(h / 2),
         width: w, height: h,
         fill: "#1e293b", stroke: "#475569", strokeWidth: 1.5,
-        rx: 6, ry: 6,
-        originX: "left", originY: "top",
+        rx: 6, ry: 6, originX: "left", originY: "top",
       });
       const label = new FabricText(obj.label, {
         fontSize: 13, fill: "#e2e8f0",
         fontFamily: "system-ui, -apple-system, sans-serif",
-        fontWeight: "600",
-        originX: "center", originY: "center",
+        fontWeight: "600", originX: "center", originY: "center",
       });
 
       const group = new Group([rect, label], {
-        left: x + w / 2,
-        top:  y + h / 2,
-        originX: "center",
-        originY: "center",
+        left: x + w / 2, top: y + h / 2,
+        originX: "center", originY: "center",
       });
 
       fc.add(group);
       labelPositions.current.set(obj.label, { cx: x + w / 2, cy: y + h / 2 });
     }
 
-    // Pass 2 — add arrows between labeled boxes.
     for (const obj of objects) {
       if (obj.type !== "arrow") continue;
       const from = labelPositions.current.get(obj.from);
@@ -508,34 +667,28 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
       const tipX     = to.cx - Math.cos(angle) * 20;
       const tipY     = to.cy - Math.sin(angle) * 20;
 
-      const line = new Line([from.cx, from.cy, tipX, tipY], {
-        stroke: "#64748b", strokeWidth: 1.5,
-        selectable: true, evented: true,
-      });
-      const head = new Triangle({
-        left: to.cx - Math.cos(angle) * 12,
-        top:  to.cy - Math.sin(angle) * 12,
+      fc.add(new Line([from.cx, from.cy, tipX, tipY], {
+        stroke: "#64748b", strokeWidth: 1.5, selectable: true, evented: true,
+      }));
+      fc.add(new Triangle({
+        left: to.cx - Math.cos(angle) * 12, top: to.cy - Math.sin(angle) * 12,
         width: 12, height: 14, fill: "#64748b",
-        angle: angleDeg + 90,
-        originX: "center", originY: "center",
+        angle: angleDeg + 90, originX: "center", originY: "center",
         selectable: true, evented: true,
-      });
-
-      fc.add(line);
-      fc.add(head);
+      }));
     }
 
     fc.requestRenderAll();
   }
 
   // ── Zoom controls ─────────────────────────────────────────────────────────
+
   function zoomBy(factor: number) {
-    const fc = fabricRef.current;
+    const fc    = fabricRef.current;
     const Point = FabricPoint.current;
     if (!fc || !Point) return;
     const center = new Point(fc.width / 2, fc.height / 2);
-    const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, fc.getZoom() * factor));
-    fc.zoomToPoint(center, z);
+    fc.zoomToPoint(center, Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, fc.getZoom() * factor)));
     fc.requestRenderAll();
   }
 
@@ -547,15 +700,31 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
   }
 
   // ── Clear ─────────────────────────────────────────────────────────────────
+
   function clearCanvas() {
     const fc = fabricRef.current;
     if (!fc) return;
+    isReceiving.current = true;
     fc.clear();
     fc.requestRenderAll();
-    socketRef.current?.emit("whiteboard-change", { roomId, whiteboardData: "" });
+    isReceiving.current = false;
+
+    // Clear Yjs: delete all objects + signal peers via meta
+    const ydoc     = ydocRef.current;
+    const yobjects = yobjectsRef.current;
+    const ymeta    = ymetaRef.current;
+    if (ydoc && yobjects && ymeta) {
+      ydoc.transact(() => {
+        Array.from(yobjects.keys()).forEach((k) => yobjects.delete(k));
+        ymeta.set("clearTs", Date.now().toString());
+      });
+    }
+    localStorage.removeItem(`room-wb-${roomId}`);
+    onWbChangeRef.current?.("");
   }
 
   // ─── Render ───────────────────────────────────────────────────────────────
+
   return (
     <div className="flex flex-col h-full">
 
@@ -626,21 +795,36 @@ export default function Whiteboard({ socket, roomId, initialData, drawCommand }:
 
       </div>
 
-      {/* ── Infinite canvas ───────────────────────────────────────────────── */}
-      {/* The dot-grid is a CSS background on this div. Fabric's canvas has    */}
-      {/* no backgroundColor, so it's transparent — the dots show through.    */}
-      {/* syncGrid() updates background-size and background-position on every  */}
-      {/* render to keep the grid locked to world-space as you pan and zoom.   */}
+      {/* ── Infinite canvas + remote cursor overlay ───────────────────────── */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-hidden"
+        className="flex-1 overflow-hidden relative"
         style={{
-          backgroundColor:   BG,
-          backgroundImage:   "radial-gradient(circle, #3f3f46 1.5px, transparent 1.5px)",
-          backgroundSize:    `${GRID_PX}px ${GRID_PX}px`,
+          backgroundColor: BG,
+          backgroundImage: "radial-gradient(circle, #3f3f46 1.5px, transparent 1.5px)",
+          backgroundSize:  `${GRID_PX}px ${GRID_PX}px`,
         }}
       >
         <canvas ref={canvasElRef} />
+
+        {/* Render a coloured dot for each remote user's cursor */}
+        {remoteCursors.map((cursor) => (
+          <div
+            key={cursor.id}
+            className="absolute pointer-events-none z-50"
+            style={{
+              left:       cursor.x,
+              top:        cursor.y,
+              transform:  "translate(-5px, -5px)",
+              transition: "left 50ms linear, top 50ms linear",
+            }}
+          >
+            <div
+              className="w-3 h-3 rounded-full border-2 border-white shadow-md"
+              style={{ background: cursor.color }}
+            />
+          </div>
+        ))}
       </div>
 
       {/* ── Hint bar ─────────────────────────────────────────────────────── */}
