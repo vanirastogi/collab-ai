@@ -422,10 +422,10 @@ export default function RoomPage() {
 
           <div className={`absolute inset-0 ${tab === "whiteboard" ? "flex" : "hidden"}`}>
             <Whiteboard
-              socket={socket}
               roomId={roomId}
               initialData={whiteboardData || undefined}
               drawCommand={drawCommand}
+              onWhiteboardChange={setWhiteboardData}
             />
           </div>
 
