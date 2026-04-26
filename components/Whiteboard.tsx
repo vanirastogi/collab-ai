@@ -249,11 +249,16 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
       fc.on("mouse:move", (opt) => {
         const e = opt.e as MouseEvent;
 
+        // opt.absolutePointer is Fabric's own world-space coordinate — it
+        // correctly accounts for viewport transform, CSS layout, and device
+        // pixel ratio.  Using e.offsetX/Y directly breaks on smaller screens
+        // because offsetX/Y can go out of range during pointer-captured drag.
+        const wp = opt.absolutePointer;
+
         // Broadcast cursor position via awareness — use world coords so
         // peers with different pan/zoom see the cursor at the right position
         const provider = providerRef.current;
-        if (provider) {
-          const wp = toCanvas(e);
+        if (provider && wp) {
           provider.awareness.setLocalStateField("cursor", {
             x: wp.x,
             y: wp.y,
@@ -263,13 +268,12 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
 
         // Stream freehand path points to peers via Socket.IO so they see
         // the stroke growing live — before the final object syncs via Yjs
-        if (fc.isDrawingMode && isDrawing.current && currentStrokeId.current) {
-          const p    = toCanvas(e);
+        if (fc.isDrawingMode && isDrawing.current && currentStrokeId.current && wp) {
           const sock = getSocket();
           sock?.emit("wb:point", {
             roomId,
             strokeId: currentStrokeId.current,
-            x: p.x, y: p.y,
+            x: wp.x, y: wp.y,
             color: colorRef.current,
             width: brushRef.current?.width ?? 4,
           });
@@ -372,6 +376,11 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
         fc.requestRenderAll();
         isShaping.current     = false;
         shapeStartRef.current = null;
+      });
+
+      // Clear our cursor from peers when the pointer leaves the canvas
+      fc.on("mouse:out", () => {
+        providerRef.current?.awareness.setLocalStateField("cursor", null);
       });
 
       // Space key pan mode
@@ -591,13 +600,15 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
 
       // Live cursors: store peers' world-space positions in a ref and redraw.
       // Using a ref (not state) avoids React re-renders on every mouse move.
+      // cursor === null means the peer left the canvas — remove their dot.
       provider.awareness.on("change", () => {
         const map = remoteCursorWorldRef.current;
         map.clear();
         provider.awareness.getStates().forEach((state, clientId) => {
           if (clientId === provider.awareness.clientID) return;
-          const c = state.cursor as { x: number; y: number; color: string } | undefined;
+          const c = state.cursor as { x: number; y: number; color: string } | null | undefined;
           if (c) map.set(clientId, { x: c.x, y: c.y, color: c.color ?? "#4ade80" });
+          // null cursor → peer left canvas, already removed by map.clear() above
         });
         fc.requestRenderAll(); // triggers after:render which draws cursor dots
       });
