@@ -249,18 +249,21 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
       fc.on("mouse:move", (opt) => {
         const e = opt.e as MouseEvent;
 
-        // opt.pointer is Fabric's own DPR-corrected, CSS-layout-adjusted canvas
-        // coordinate — more reliable than e.offsetX/Y which breaks when the
-        // pointer is captured outside the canvas on smaller screens.
-        // Convert to world space by undoing the viewport transform.
-        const sp = opt.pointer;
+        // Compute world-space pointer from clientX/Y + getBoundingClientRect.
+        // This is immune to offsetX/Y edge-case bugs (pointer captured outside
+        // canvas on smaller screens) and handles DPR and CSS scaling correctly.
+        const rect = (fc.getElement() as HTMLCanvasElement).getBoundingClientRect();
+        const scaleX = fc.width!  / rect.width;
+        const scaleY = fc.height! / rect.height;
+        const cx = (e.clientX - rect.left) * scaleX;
+        const cy = (e.clientY - rect.top)  * scaleY;
         const vt = fc.viewportTransform!;
-        const wp = sp ? { x: (sp.x - vt[4]) / vt[0], y: (sp.y - vt[5]) / vt[3] } : null;
+        const wp = { x: (cx - vt[4]) / vt[0], y: (cy - vt[5]) / vt[3] };
 
         // Broadcast cursor position via awareness — use world coords so
         // peers with different pan/zoom see the cursor at the right position
         const provider = providerRef.current;
-        if (provider && wp) {
+        if (provider) {
           provider.awareness.setLocalStateField("cursor", {
             x: wp.x,
             y: wp.y,
@@ -270,7 +273,7 @@ export default function Whiteboard({ roomId, initialData, drawCommand, onWhitebo
 
         // Stream freehand path points to peers via Socket.IO so they see
         // the stroke growing live — before the final object syncs via Yjs
-        if (fc.isDrawingMode && isDrawing.current && currentStrokeId.current && wp) {
+        if (fc.isDrawingMode && isDrawing.current && currentStrokeId.current) {
           const sock = getSocket();
           sock?.emit("wb:point", {
             roomId,
